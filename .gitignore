@@ -1,0 +1,26 @@
+# 用户配置文件（首次运行自动生成）
+kira_manager/manager_config.json
+
+# 日志
+kira_manager/logs/*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# 虚拟环境
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store

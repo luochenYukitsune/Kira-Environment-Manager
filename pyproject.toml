@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kira-manager"
+version = "2.18.0"
+description = "Kira Environment Manager — 下载、配置、运行多个 KiraAI 实例"
+readme = "README.md"
+license = {text = "AGPL-3.0"}
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt5>=5.15.0",
+    "qfluentwidgets>=1.11.0",
+]
+
+[project.scripts]
+kira-manager = "kira_manager.main:main"
