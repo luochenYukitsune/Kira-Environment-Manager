@@ -14,6 +14,7 @@ from kira_env_manager.utils.logger import (
     notify_success, notify_error, notify_warning,
     logger,
 )
+from kira_env_manager.utils.helpers import strip_ansi
 from kira_env_manager.common.constants import PAGE_MARGINS, BUTTON_HEIGHT_SMALL
 
 MAX_DISPLAY_LINES = 500  # 最大显示行数
@@ -116,7 +117,6 @@ class LogPage(QWidget):
             startup_offset = get_startup_offset()
 
             with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-                # 如果有启动偏移量，跳过之前的日志
                 if startup_offset > 0:
                     try:
                         f.seek(startup_offset)
@@ -125,7 +125,6 @@ class LogPage(QWidget):
 
                 lines = f.readlines()
 
-                # 限制显示行数
                 if len(lines) > MAX_DISPLAY_LINES:
                     lines = lines[-MAX_DISPLAY_LINES:]
 
@@ -134,7 +133,7 @@ class LogPage(QWidget):
             return f"读取日志失败: {e}"
 
     def _refresh_log(self):
-        """刷新日志内容"""
+        """刷新日志内容（自动过滤 ANSI 转义码）"""
         log_path = get_log_path()
         if not os.path.exists(log_path):
             self.log_browser.setPlainText("日志文件不存在")
@@ -145,14 +144,14 @@ class LogPage(QWidget):
         if not content:
             content = "(本次启动后暂无日志)"
 
-        self.log_browser.setPlainText(content)
+        # 过滤 ANSI 转义码
+        self.log_browser.setPlainText(strip_ansi(content))
 
         try:
             self._last_size = os.path.getsize(log_path)
         except OSError:
             pass
 
-        # 自动滚动到底部
         if self.auto_scroll_btn.isChecked():
             cursor = self.log_browser.textCursor()
             cursor.movePosition(cursor.MoveOperation.End)
