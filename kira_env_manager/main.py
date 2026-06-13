@@ -30,32 +30,58 @@ def _init_surface_format():
     QSurfaceFormat.setDefaultFormat(fmt)
 
 
+def _resolve_font_path():
+    """解析最终字体路径：优先使用用户配置，其次内置默认"""
+    from pathlib import Path
+
+    # 1) 尝试从配置文件读取自定义字体路径
+    try:
+        from kira_env_manager.common.config import get as cfg_get
+        cfg_path = cfg_get("font_path")
+        if cfg_path:
+            p = Path(cfg_path)
+            if p.exists():
+                return p
+            logger.warning(f"配置的字体路径不存在: {cfg_path}，回退内置字体")
+    except Exception:
+        pass
+
+    # 2) 回退内置字体目录
+    if getattr(sys, 'frozen', False):
+        font_dir = Path(sys._MEIPASS) / "kira_env_manager" / "fonts"
+    else:
+        font_dir = Path(__file__).parent / "fonts"
+
+    # 尝试 HarmonyOS Sans（首选），再试苹方字体
+    for name in ("HarmonyOS_Sans_Regular.ttf", "苹方字体.ttf"):
+        p = font_dir / name
+        if p.exists():
+            return p
+
+    return font_dir / "苹方字体.ttf"  # 不管存不存在，caller 处理
+
+
 def _init_global_font(app):
-    """加载苹方字体并设为 QApplication 默认字体"""
+    """加载自定义/内置字体并设为 QApplication 默认字体"""
     from pathlib import Path
 
     try:
-        if getattr(sys, 'frozen', False):
-            font_dir = Path(sys._MEIPASS) / "kira_env_manager" / "fonts"
-        else:
-            font_dir = Path(__file__).parent / "fonts"
-
-        font_path = font_dir / "苹方字体.ttf"
+        font_path = _resolve_font_path()
         if not font_path.exists():
             logger.warning(f"字体文件不存在: {font_path}")
             return
 
         font_id = QFontDatabase.addApplicationFont(str(font_path))
         if font_id < 0:
-            logger.warning("字体注册失败")
+            logger.warning(f"字体注册失败: {font_path}")
             return
 
         family = QFontDatabase.applicationFontFamilies(font_id)[0]
-        logger.info(f"已加载字体: {family}")
+        logger.info(f"已加载字体: {family} ({font_path.name})")
 
         app.setFont(QFont(family))
 
-        # 同步到 qfluentwidgets 字体系统（覆盖默认的 Segoe UI / Microsoft YaHei / PingFang SC）
+        # 同步到 qfluentwidgets 字体系统
         from qfluentwidgets.common.font import setFontFamilies, fontFamilies
         setFontFamilies([family] + fontFamilies())
     except Exception as e:

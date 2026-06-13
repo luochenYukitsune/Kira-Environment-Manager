@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kira-env-manager"
-version = "0.6.1_beta"
+version = "0.7.0beta"
 description = "KiraAI 环境管理工具 — 下载、配置、运行多个 KiraAI 实例"
 readme = "README.md"
 license = {text = "AGPL-3.0"}

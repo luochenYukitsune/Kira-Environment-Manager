@@ -1,7 +1,9 @@
-"""环境配置页 - Python 检测、镜像选择、venv 创建、依赖安装"""
+"""环境配置页 - Python 检测、镜像选择、venv 创建、依赖安装、字体设置"""
 
 import os
+from pathlib import Path
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QFontDatabase
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFileDialog, QScrollArea, QInputDialog,
     QMessageBox,
@@ -188,6 +190,31 @@ class EnvPage(QScrollArea):
 
         layout.addWidget(self.deps_group)
 
+        # === 字体设置 ===
+        self.font_group = SettingCardGroup("字体设置", container)
+
+        current_font_path = cfg_get("font_path") or ""
+        if current_font_path:
+            font_hint = Path(current_font_path).name
+        else:
+            font_hint = "HarmonyOS Sans（内置默认）"
+
+        self.font_card = PushSettingCard(
+            "选择字体", FIF.FONT, "当前字体",
+            font_hint, self.font_group,
+        )
+        self.font_card.clicked.connect(self._choose_font)
+        self.font_group.addSettingCard(self.font_card)
+
+        self.font_reset_card = PushSettingCard(
+            "重置", FIF.DELETE, "恢复默认字体",
+            "清除自定义字体配置，使用内置默认字体", self.font_group,
+        )
+        self.font_reset_card.clicked.connect(self._reset_font)
+        self.font_group.addSettingCard(self.font_reset_card)
+
+        layout.addWidget(self.font_group)
+
         # 输出控制台
         self.console = TextBrowser(container)
         self.console.setPlaceholderText("操作输出将显示在这里...")
@@ -230,6 +257,38 @@ class EnvPage(QScrollArea):
             self.python_card.setContent("请安装 Python 3.10+")
             self.download_widget.setVisible(True)
             notify_warning("未检测到 Python", "请先安装 Python 3.10+", parent=self)
+
+    # ---- 字体设置 ----
+
+    def _choose_font(self):
+        """打开文件对话框选择 TTF 字体"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择字体文件", "",
+            "TrueType 字体 (*.ttf);;所有文件 (*)",
+        )
+        if not path:
+            return
+
+        # 尝试验证字体文件
+        font_id = QFontDatabase.addApplicationFont(path)
+        if font_id < 0:
+            notify_error("无效字体", "所选文件不是有效的 TrueType 字体", parent=self)
+            return
+
+        family = QFontDatabase.applicationFontFamilies(font_id)[0]
+        cfg_set("font_path", path)
+        self.font_card.setContent(Path(path).name)
+        notify_success(
+            "字体已设置",
+            f"已切换到: {family}\n重启应用后生效",
+            parent=self, duration=4000,
+        )
+
+    def _reset_font(self):
+        """恢复内置默认字体"""
+        cfg_set("font_path", "")
+        self.font_card.setContent("HarmonyOS Sans（内置默认）")
+        notify_info("字体已重置", "已恢复内置默认字体，重启应用后生效", parent=self, duration=3000)
 
     def _choose_mirror(self):
         items = [f"{m[0]}  -  {m[2]}" for m in MIRRORS]

@@ -1,6 +1,7 @@
 """UI 公共工具 — 控制台滚动、镜像选择、色彩常量、端口检测"""
 
 import socket
+from enum import Enum
 
 from qfluentwidgets import isDarkTheme, StateToolTip
 
@@ -101,3 +102,28 @@ def create_state_tooltip(title, content, parent):
     tip.move(tip.getSuitablePos())
     tip.show()
     return tip
+
+
+class InstanceState(Enum):
+    """KiraInstance 状态机"""
+    IDLE = "idle"
+    STARTING = "starting"
+    RUNNING = "running"
+    STOPPING = "stopping"
+    ERROR = "error"
+
+
+def state_color(state: InstanceState, dark=None):
+    """InstanceState → 颜色值（用于状态圆点）"""
+    if dark is None:
+        from qfluentwidgets import isDarkTheme
+        dark = isDarkTheme()
+
+    mapping = {
+        InstanceState.IDLE:     "#9e9e9e" if not dark else "#9e9e9e",
+        InstanceState.STARTING: "#fdd835" if not dark else "#fdd835",
+        InstanceState.RUNNING:  "#4caf50" if not dark else "#81c784",
+        InstanceState.STOPPING: "#fdd835" if not dark else "#fdd835",
+        InstanceState.ERROR:    "#f44336" if not dark else "#e57373",
+    }
+    return mapping.get(state, "#9e9e9e")

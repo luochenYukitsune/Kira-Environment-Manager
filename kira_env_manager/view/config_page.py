@@ -143,6 +143,8 @@ class ConfigDialog(QDialog):
             # 同步更新 instance.cfg 中的端口，使 InstanceCard 显示更新
             if key == "port" and self.instance:
                 self.instance.cfg["port"] = val
+                # 新增: 通知卡片刷新端口显示和状态检测
+                self.instance.port_changed.emit(val)
                 # 持久化到 manager_config.json
                 self._save_instance_config()
 

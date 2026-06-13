@@ -2,7 +2,7 @@
 ; 用法: ISCC.exe scripts\installer.iss
 
 #define MyAppName "KiraEnvManager"
-#define MyAppVersion "0.6.1_beta"
+#define MyAppVersion "0.6.2beta"
 #define MyAppPublisher "KiraAI"
 #define MyAppURL "https://github.com/xxynet/KiraAI"
 #define MyAppExeName "KiraEnvManager.exe"

@@ -7,7 +7,7 @@
 ;   或命令行: iscc installer.iss
 
 #define MyAppName "Kira Environment Manager"
-#define MyAppVersion "0.6.1_beta"
+#define MyAppVersion "0.6.2beta"
 #define MyAppPublisher "KiraAI"
 #define MyAppURL "https://github.com/xxynet/KiraAI"
 #define MyAppExeName "KiraEnvManager.exe"

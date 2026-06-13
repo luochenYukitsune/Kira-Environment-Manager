@@ -22,7 +22,9 @@ DEFAULT_CONFIG = {
     "auto_scroll_console": True,
     "mirror_index": 2,  # 默认阿里云
     "auto_detect_mirror": True,  # 安装前自动测速
+    "font_path": "",  # 自定义字体路径，空=使用内置默认字体
     "instances": [],  # [{name, port, data_dir, project_path, extra_args}]
+    "tray_close_action": "ask",  # "ask"=每次询问 | "minimize"=缩托盘 | "exit"=直接退出
 }
 
 CONFIG_FILE = get_app_data_dir() / "manager_config.json"

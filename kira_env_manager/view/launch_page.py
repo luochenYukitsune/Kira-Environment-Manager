@@ -1,9 +1,13 @@
 """启动管理页 - 下载安装 KiraAI、多实例管理、控制台"""
 
 import os
+import json
 import shutil
 import stat
 import socket
+import signal
+import subprocess
+from pathlib import Path
 from PyQt5.QtCore import Qt, pyqtSignal, QThread, QTimer
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
@@ -23,7 +27,7 @@ from qfluentwidgets import (
 from kira_env_manager.utils.instance_manager import InstanceManager
 from kira_env_manager.utils.python_env import (
     get_venv_python, is_venv, create_venv, install_requirements,
-    check_dependencies_installed,
+    check_dependencies_installed, find_system_python,
 )
 from kira_env_manager.utils.project import (
     clone_repo, check_kira_version, is_kira_project,
@@ -98,7 +102,6 @@ class SetupWorker(QThread):
         self.fallback_mirrors = fallback_mirrors
 
     def run(self):
-        from pathlib import Path
 
         venv = Path(self.venv_path)
 
@@ -354,18 +357,60 @@ class _DepsCheckWorker(QThread):
         self.project_path = project_path
 
     def run(self):
-        if not self.venv_path or not self.project_path:
-            self.finished.emit(False, ["无venv"], "无虚拟环境")
+        if not self.project_path:
+            self.finished.emit(False, ["无项目路径"], "无项目路径")
             return
-        if not is_venv(self.venv_path):
-            self.finished.emit(False, ["venv无效"], "虚拟环境无效")
+
+        # 没有 venv 时尝试系统 Python
+        if not self.venv_path or not is_venv(self.venv_path):
+            sys_python = find_system_python()
+            if not sys_python:
+                self.finished.emit(False, ["无 Python"], "未检测到 Python 环境")
+                return
+            req = os.path.join(self.project_path, "requirements.txt")
+            if not os.path.exists(req):
+                self.finished.emit(False, ["无 requirements.txt"], "无依赖文件")
+                return
+            try:
+                result = subprocess.run(
+                    [sys_python, "-m", "pip", "list", "--format=freeze"],
+                    capture_output=True, text=True, timeout=15,
+                    encoding='utf-8', errors='replace',
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+                )
+                installed = set()
+                for line in result.stdout.splitlines():
+                    if "==" in line:
+                        name = line.split("==")[0].strip().lower().replace("_", "-")
+                        installed.add(name)
+
+                required = set()
+                for line in Path(req).read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#") or line.startswith("-"):
+                        continue
+                    pkg = line.split("==")[0].split(">=")[0].split("~=")[0].split("<")[0].split("!=")[0]
+                    pkg = pkg.split("[")[0].split(";")[0].strip().lower().replace("_", "-")
+                    if pkg:
+                        required.add(pkg)
+
+                missing = sorted(p for p in required if p not in installed)
+                ok = len(missing) == 0
+                self.finished.emit(ok, missing, f"缺失 {len(missing)}/{len(required)} 个" if missing else "全部已安装")
+            except Exception:
+                self.finished.emit(False, ["检查失败"], "依赖检查出错")
             return
+
+        # 有有效 venv，用现有逻辑
         req = os.path.join(self.project_path, "requirements.txt")
         if not os.path.exists(req):
-            self.finished.emit(False, ["无requirements.txt"], "无依赖文件")
+            self.finished.emit(False, ["无 requirements.txt"], "无依赖文件")
             return
-        ok, missing, msg = check_dependencies_installed(self.venv_path, req)
-        self.finished.emit(ok, missing, msg)
+        try:
+            ok, missing, msg = check_dependencies_installed(self.venv_path, req)
+            self.finished.emit(ok, missing, msg)
+        except Exception:
+            self.finished.emit(False, ["检查失败"], "依赖检查异常")
 
 
 class InstanceCard(CardWidget):
@@ -417,11 +462,18 @@ class InstanceCard(CardWidget):
         layout.addWidget(info_frame)
         layout.addStretch()
 
-        venv_path = cfg_get("venv_path")
+        # 使用实例自身的 venv_path，没有则尝试项目目录下 venv
+        venv_path = instance.cfg.get("venv_path", "")
+        if not venv_path or not is_venv(venv_path):
+            project_venv = os.path.join(instance.project_path, "venv") if instance.project_path else ""
+            venv_path = project_venv if is_venv(project_venv) else ""
         project_path = instance.project_path or cfg_get("project_path")
         self._deps_worker = _DepsCheckWorker(venv_path, project_path, self)
         self._deps_worker.finished.connect(self._on_deps_checked)
         self._deps_worker.start()
+
+        # 监听端口变更
+        instance.port_changed.connect(self._on_port_changed)
 
         # 按钮
         btn_row = QHBoxLayout()
@@ -467,10 +519,20 @@ class InstanceCard(CardWidget):
 
     def _on_deps_checked(self, ok, missing, msg):
         self.deps_ok = ok
+        # 更新实例缓存
+        self.inst.cfg["deps_ok"] = ok
         if ok:
             self.deps_label.setText("依赖: 已安装")
+            self.deps_label.setStyleSheet("color: #4caf50")
         else:
             self.deps_label.setText(f"依赖: 缺失 {len(missing)} 个")
+            self.deps_label.setStyleSheet("color: #f44336")
+
+    def _on_port_changed(self, new_port):
+        """端口变更时刷新显示和状态检测"""
+        self.port_label.setText(f"端口: {new_port}")
+        # 立即做一次端口检测
+        QTimer.singleShot(500, self._check_port_status)
 
     def _check_port_status(self):
         """通过撞端口检测实例是否在运行"""
@@ -625,7 +687,6 @@ class LaunchPage(QScrollArea):
 
     def _get_pid_by_port(self, port):
         """根据端口获取占用该端口的进程 PID（跨平台）"""
-        import subprocess
         try:
             if os.name == 'nt':
                 result = subprocess.run(
@@ -655,8 +716,6 @@ class LaunchPage(QScrollArea):
 
     def _kill_process_by_pid(self, pid):
         """根据 PID 杀死进程（跨平台）"""
-        import subprocess
-        import signal
         try:
             if os.name == 'nt':
                 subprocess.run(
@@ -736,13 +795,13 @@ class LaunchPage(QScrollArea):
         })
         self._save()
 
-    def _install_deps_for_path(self, project_path, on_done=None):
+    def _install_deps_for_path(self, project_path, venv_path=None, on_done=None):
         """为指定路径创建 venv 并安装依赖
 
-        流程：
-        1. 检查 requirements.txt 是否存在
-        2. 计算 venv 路径（始终在项目目录下）
-        3. 使用 SetupWorker 创建 venv（如果需要）并安装依赖
+        Args:
+            project_path: KiraAI 项目路径
+            venv_path: 指定 venv 路径（None 则默认为 project_path/venv）
+            on_done: 安装完成后的回调
         """
         if self._setup_worker and self._setup_worker.isRunning():
             self._setup_worker.terminate()
@@ -754,8 +813,9 @@ class LaunchPage(QScrollArea):
             notify_warning("跳过", "找不到 requirements.txt，依赖安装跳过", parent=self)
             return
 
-        # venv 路径始终在项目目录下
-        venv_path = os.path.join(project_path, "venv")
+        # venv 路径：优先使用传入值，否则用 project_path/venv
+        if venv_path is None:
+            venv_path = os.path.join(project_path, "venv")
 
         # 确定状态提示文本
         if is_venv(venv_path):
@@ -793,6 +853,11 @@ class LaunchPage(QScrollArea):
                 cfg_set("project_path", project_path)
             if venv_path:
                 cfg_set("venv_path", venv_path)
+                # 更新所有引用此 project_path 的实例的 venv_path
+                for inst in self._im.instances():
+                    if inst.project_path and inst.project_path == project_path:
+                        inst.cfg["venv_path"] = venv_path
+                        inst.cfg["deps_ok"] = True
             notify_success("环境就绪", msg, parent=self)
             if on_done:
                 on_done()
@@ -800,6 +865,21 @@ class LaunchPage(QScrollArea):
             notify_error("配置失败", msg, parent=self)
 
     # ---- 添加已有项目 ----
+
+    @staticmethod
+    def _discover_port(project_path, data_dir):
+        """从已有实例的 webui.json 发现端口，失败返回 None"""
+        webui_path = os.path.join(data_dir, "webui.json")
+        if os.path.exists(webui_path):
+            try:
+                with open(webui_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                port = cfg.get("port", 5267)
+                if isinstance(port, int) and 1024 <= port <= 65535:
+                    return port
+            except (json.JSONDecodeError, OSError):
+                pass
+        return None
 
     def _add_existing(self):
         path = QFileDialog.getExistingDirectory(self, "选择 KiraAI 项目目录")
@@ -813,15 +893,37 @@ class LaunchPage(QScrollArea):
         if not ok or not name.strip():
             return
 
-        used_ports = {inst.port for inst in self._im.instances()}
-        port = 5267
-        while port in used_ports:
-            port += 1
+        data_dir = os.path.join(path, "data")
+
+        # 尝试自动发现端口
+        discovered_port = self._discover_port(path, data_dir)
+        if discovered_port is not None:
+            port = discovered_port
+        else:
+            used_ports = {inst.port for inst in self._im.instances()}
+            port = 5267
+            while port in used_ports:
+                port += 1
+
+        # venv 探测 + 依赖检查
+        venv_path = ""
+        deps_ok = False
+        # 1) 检查项目下是否有 venv
+        project_venv = os.path.join(path, "venv")
+        if is_venv(project_venv):
+            venv_path = project_venv
+        # 2) 如有 venv，检查依赖
+        req_path = os.path.join(path, "requirements.txt")
+        if venv_path and os.path.exists(req_path):
+            ok_deps, _, _ = check_dependencies_installed(venv_path, req_path)
+            deps_ok = ok_deps
 
         self._im.add({
             "name": name.strip(), "port": port,
-            "data_dir": os.path.join(path, "data"),
+            "data_dir": data_dir,
             "project_path": path, "extra_args": [],
+            "venv_path": venv_path,
+            "deps_ok": deps_ok,
         })
         self._save()
 
@@ -967,6 +1069,29 @@ class LaunchPage(QScrollArea):
 
     # ---- 启动/停止 (含强制依赖检查) ----
 
+    @staticmethod
+    def _resolve_venv(instance):
+        """按优先级解析 venv 路径
+
+        优先级: 实例 cfg.venv_path > 全局 venv_path > 项目目录下 venv
+        """
+        # 1) 实例自己的 venv
+        inst_venv = instance.cfg.get("venv_path", "")
+        if inst_venv and is_venv(inst_venv):
+            return inst_venv
+        # 2) 全局 venv（向后兼容）
+        global_venv = cfg_get("venv_path")
+        if global_venv and is_venv(global_venv):
+            return global_venv
+        # 3) 项目目录下的 venv
+        project_path = instance.project_path or cfg_get("project_path")
+        if project_path:
+            project_venv = os.path.join(project_path, "venv")
+            if is_venv(project_venv):
+                return project_venv
+        # 4) 无有效 venv
+        return None
+
     def _on_start(self, instance):
         try:
             project_path = instance.project_path or cfg_get("project_path")
@@ -977,31 +1102,30 @@ class LaunchPage(QScrollArea):
                 notify_error("错误", f"项目不完整，缺少 main.py", parent=self)
                 return
 
-            # venv 路径：优先使用已配置的 venv，否则用项目目录下的默认路径
-            venv_path = cfg_get("venv_path") or os.path.join(project_path, "venv")
+            # 使用优先级链解析 venv
+            venv_path = self._resolve_venv(instance)
 
-            # 检查 venv 是否存在且有效
-            if not is_venv(venv_path):
+            if venv_path is None:
+                # 无有效 venv：询问是否创建
                 reply = QMessageBox.question(
                     self, "环境未就绪",
-                    "虚拟环境尚未创建。\n\n是否创建 venv 并安装依赖？",
+                    "未检测到有效的虚拟环境。\n\n是否创建 venv 并安装依赖？",
                     QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
                 )
                 if reply == QMessageBox.Yes:
+                    venv_path = os.path.join(project_path, "venv")
                     self._install_deps_for_path(
-                        project_path,
+                        project_path, venv_path=venv_path,
                         on_done=lambda: self._do_start(instance, project_path, venv_path),
                     )
                 return
 
-            # 更新配置
+            # 有 venv，检查依赖
             cfg_set("project_path", project_path)
             cfg_set("venv_path", venv_path)
 
-            # 检查依赖
-            deps_ok, missing, _ = check_dependencies_installed(
-                venv_path, os.path.join(project_path, "requirements.txt"),
-            )
+            req_file = os.path.join(project_path, "requirements.txt")
+            deps_ok, missing, _ = check_dependencies_installed(venv_path, req_file)
             if not deps_ok:
                 reply = QMessageBox.question(
                     self, "依赖未安装",
@@ -1010,7 +1134,7 @@ class LaunchPage(QScrollArea):
                 )
                 if reply == QMessageBox.Yes:
                     self._install_deps_for_path(
-                        project_path,
+                        project_path, venv_path=venv_path,
                         on_done=lambda: self._do_start(instance, project_path, venv_path),
                     )
                 return

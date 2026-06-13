@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QMessageBox
 
@@ -14,6 +15,8 @@ from kira_env_manager.view.launch_page import LaunchPage
 from kira_env_manager.view.browser_page import BrowserPage
 from kira_env_manager.view.log_page import LogPage
 from kira_env_manager.common.constants import WINDOW_WIDTH, WINDOW_HEIGHT
+from kira_env_manager.utils.tray_manager import TrayManager
+from kira_env_manager.common.config import get as cfg_get, set_config as cfg_set
 
 
 class MainWindow(FluentWindow):
@@ -32,6 +35,9 @@ class MainWindow(FluentWindow):
 
         self.initNavigation()
         self.initWindow()
+
+        # 创建系统托盘
+        self._tray = TrayManager(self, self.launch_page, self)
 
     def initNavigation(self):
         self.addSubInterface(
@@ -87,6 +93,19 @@ class MainWindow(FluentWindow):
             (geo.height() - self.height()) // 2,
         )
 
+    def changeEvent(self, event):
+        """拦截窗口状态变化：最小化时缩入系统托盘"""
+        if event.type() == event.WindowStateChange:
+            if self.windowState() & Qt.WindowMinimized:
+                QTimer.singleShot(100, self._minimize_to_tray)
+        super().changeEvent(event)
+
+    def _minimize_to_tray(self):
+        """隐藏窗口到托盘并显示通知"""
+        self.hide()
+        if hasattr(self, '_tray'):
+            self._tray.show_minimize_notification()
+
     def switchToQWidget(self, routeKey):
         targets = {
             "homePage": self.home_page,
@@ -105,10 +124,44 @@ class MainWindow(FluentWindow):
         self.navigationInterface.setCurrentItem(target.objectName())
 
     def closeEvent(self, event):
-        """关闭窗口时停止所有运行中的实例"""
+        """关闭窗口时：根据配置决定退出还是缩入托盘"""
+        from PyQt5.QtWidgets import QCheckBox
         from kira_env_manager.utils.logger import logger
 
-        # 清理启动页卡片中的后台线程，避免 QThread destroyed while running
+        action = cfg_get("tray_close_action")
+
+        if action == "ask":
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Kira Environment Manager")
+            msg_box.setText("要关闭程序还是最小化到系统托盘？")
+            msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
+            msg_box.button(QMessageBox.Yes).setText("最小化到托盘")
+            msg_box.button(QMessageBox.No).setText("退出")
+            msg_box.setDefaultButton(QMessageBox.Yes)
+
+            cb = QCheckBox("不再询问，记住我的选择")
+            msg_box.setCheckBox(cb)
+
+            reply = msg_box.exec_()
+
+            if reply == QMessageBox.Cancel:
+                event.ignore()
+                return
+
+            if cb.isChecked():
+                cfg_set("tray_close_action", "minimize" if reply == QMessageBox.Yes else "exit")
+
+            if reply == QMessageBox.Yes:
+                event.ignore()
+                QTimer.singleShot(50, self._minimize_to_tray)
+                return
+
+        elif action == "minimize":
+            event.ignore()
+            QTimer.singleShot(50, self._minimize_to_tray)
+            return
+
+        # action == "exit" 或用户选择了退出: 正常退出流程
         if hasattr(self, 'launch_page'):
             cards_widget = getattr(self.launch_page, 'cards_widget', None)
             if cards_widget:
@@ -116,7 +169,6 @@ class MainWindow(FluentWindow):
                 for card in cards_widget.findChildren(InstanceCard):
                     card.cleanup()
 
-        # 获取运行中的实例
         im = getattr(self.launch_page, "instance_manager", lambda: None)()
         if im:
             running = [inst for inst in im.instances() if inst.is_running()]
@@ -132,7 +184,6 @@ class MainWindow(FluentWindow):
                     event.ignore()
                     return
 
-                # 停止所有实例
                 for inst in running:
                     try:
                         inst.stop()
@@ -140,7 +191,6 @@ class MainWindow(FluentWindow):
                     except Exception as e:
                         logger.error(f"停止实例失败: {inst.name} - {e}")
 
-        # 停止浏览器页面定时器
         if hasattr(self, 'browser_page'):
             self.browser_page.cleanup()
 

@@ -14,6 +14,7 @@ class KiraInstance(QObject):
     output_line = pyqtSignal(str)       # 控制台输出
     state_changed = pyqtSignal(bool)    # 运行/停止
     finished = pyqtSignal(int)          # 退出码
+    port_changed = pyqtSignal(int)      # 新增: 端口变更
 
     def __init__(self, cfg, parent=None):
         """
