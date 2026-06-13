@@ -478,6 +478,13 @@ class EnvPage(QScrollArea):
             self._tooltip = None
         if ok:
             notify_success("成功", msg, parent=self)
+            # 通知启动管理页刷新卡片依赖状态
+            try:
+                w = self.window()
+                if w and hasattr(w, "launch_page"):
+                    w.launch_page._refresh_all_cards_deps()
+            except Exception:
+                pass
         else:
             logger.error(f"依赖安装失败: {msg}")
             notify_error("失败", msg, parent=self)
