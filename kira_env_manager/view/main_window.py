@@ -33,6 +33,11 @@ class MainWindow(FluentWindow):
         self.browser_page = BrowserPage(self)
         self.log_page = LogPage(self)
 
+        # 依赖安装完成后自动刷新启动管理页卡片
+        self.env_page.dependencies_changed.connect(
+            self.launch_page._refresh_all_cards_deps
+        )
+
         self.initNavigation()
         self.initWindow()
 

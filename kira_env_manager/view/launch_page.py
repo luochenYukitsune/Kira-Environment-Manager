@@ -35,7 +35,7 @@ from kira_env_manager.utils.project import (
 )
 from kira_env_manager.utils.network import test_all_routes, GITHUB_ROUTES, convert_to_clone_url
 from kira_env_manager.utils.helpers import (
-    append_and_scroll, get_mirror_for_install,
+    append_and_scroll, strip_ansi, get_mirror_for_install,
     build_clone_url_from_results, status_color,
     check_port_open,
 )
@@ -256,7 +256,7 @@ class DownloadDialog(QDialog):
         repo = self.repo_input.text().strip() or "xxynet/KiraAI"
 
         self._speed_worker = RouteSpeedWorker(repo)
-        self._speed_worker.progress.connect(lambda line: self.log.append(line))
+        self._speed_worker.progress.connect(lambda line: append_and_scroll(self.log, line))
         self._speed_worker.finished.connect(self._on_speed_done)
         self._speed_worker.start()
 
@@ -280,10 +280,10 @@ class DownloadDialog(QDialog):
     def _start_download(self):
         target = self.dir_input.text().strip()
         if not target:
-            self.log.append("请选择安装目录\n")
+            append_and_scroll(self.log, "请选择安装目录\n")
             return
         if os.path.exists(target):
-            self.log.append(f"目录已存在: {target}\n")
+            append_and_scroll(self.log, f"目录已存在: {target}\n")
             return
         if not check_git_installed():
             notify_critical("错误", "未检测到 Git，请先安装:\nhttps://git-scm.com/", parent=self)
@@ -295,8 +295,8 @@ class DownloadDialog(QDialog):
             self._best_route_name = "直连"
 
         self.log.clear()
-        self.log.append(f">>> 通道: {self._best_route_name}\n")
-        self.log.append(f">>> 目标: {target}\n\n")
+        append_and_scroll(self.log, f">>> 通道: {self._best_route_name}\n")
+        append_and_scroll(self.log, f">>> 目标: {target}\n\n")
 
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # 不确定进度
@@ -316,11 +316,11 @@ class DownloadDialog(QDialog):
     def _on_done(self, ok, msg, path):
         self.progress_bar.setVisible(False)
         if ok:
-            self.log.append(f"\n>> 下载完成: {path}\n")
+            append_and_scroll(self.log, f"\n>> 下载完成: {path}\n")
             self._target_path = path
             self.accept()
         else:
-            self.log.append(f"\n>> 下载失败: {msg}\n")
+            append_and_scroll(self.log, f"\n>> 下载失败: {msg}\n")
             self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(0)
             self.progress_bar.setVisible(False)
@@ -528,6 +528,21 @@ class InstanceCard(CardWidget):
             self.deps_label.setText(f"依赖: 缺失 {len(missing)} 个")
             self.deps_label.setStyleSheet("color: #f44336")
 
+    def refresh_deps(self):
+        """重新检查依赖状态（安装依赖后调用）"""
+        venv_path = self.inst.cfg.get("venv_path", "")
+        if not venv_path or not is_venv(venv_path):
+            project_venv = os.path.join(self.inst.project_path, "venv") if self.inst.project_path else ""
+            venv_path = project_venv if is_venv(project_venv) else ""
+        project_path = self.inst.project_path or cfg_get("project_path")
+        if self._deps_worker and self._deps_worker.isRunning():
+            self._deps_worker.quit()
+            self._deps_worker.wait(1000)
+        self.deps_label.setText("依赖: 检查中...")
+        self._deps_worker = _DepsCheckWorker(venv_path, project_path, self)
+        self._deps_worker.finished.connect(self._on_deps_checked)
+        self._deps_worker.start()
+
     def _on_port_changed(self, new_port):
         """端口变更时刷新显示和状态检测"""
         self.port_label.setText(f"端口: {new_port}")
@@ -664,6 +679,9 @@ class LaunchPage(QScrollArea):
         layout.addLayout(console_header)
 
         self.console = TextBrowser(container)
+        _cf = self.console.font()
+        _cf.setFamilies(["Microsoft YaHei UI", "Segoe UI", "Arial", "sans-serif"])
+        self.console.setFont(_cf)
         self.console.setPlaceholderText("选择实例后点击启动...")
         layout.addWidget(self.console, 1)
 
@@ -684,6 +702,21 @@ class LaunchPage(QScrollArea):
 
         # 启动时检测残留进程
         self._check_orphan_processes()
+
+    def showEvent(self, event):
+        """页面显示时刷新所有实例的依赖状态"""
+        super().showEvent(event)
+        # 延迟一下等卡片重建完成再刷新
+        QTimer.singleShot(500, self._refresh_all_cards_deps)
+
+    def _refresh_all_cards_deps(self):
+        """刷新所有卡片的依赖状态"""
+        for i in range(self.cards_layout.count()):
+            item = self.cards_layout.itemAt(i)
+            if item and item.widget():
+                card = item.widget()
+                if hasattr(card, 'refresh_deps'):
+                    card.refresh_deps()
 
     def _get_pid_by_port(self, port):
         """根据端口获取占用该端口的进程 PID（跨平台）"""
@@ -1223,6 +1256,8 @@ class LaunchPage(QScrollArea):
         self._notify_home()
 
     def _on_any_output(self, line):
+        # 过滤 ANSI 转义码
+        line = strip_ansi(line)
         # 解析实例名称 [实例名] 内容
         inst_name = None
         display_line = line

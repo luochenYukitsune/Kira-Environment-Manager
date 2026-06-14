@@ -1,9 +1,18 @@
 """UI 公共工具 — 控制台滚动、镜像选择、色彩常量、端口检测"""
 
+import re
 import socket
 from enum import Enum
 
 from qfluentwidgets import isDarkTheme, StateToolTip
+
+
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
+
+
+def strip_ansi(text: str) -> str:
+    """过滤 ANSI 转义码（颜色/样式控制序列）"""
+    return _ANSI_RE.sub('', text)
 
 
 def scroll_console_to_bottom(console):
@@ -17,15 +26,11 @@ def scroll_console_to_bottom(console):
 
 
 def append_and_scroll(console, text):
-    """向 TextBrowser 追加文本并滚动到底部
-
-    使用 insertPlainText 追加到末尾，避免 html.escape 对 < > & 等
-    正常输出字符的意外转义。
-    """
-    # 移到文档末尾后插入纯文本
+    """向 TextBrowser 追加文本（自动过滤 ANSI 转义码）并滚动到底部"""
+    clean = strip_ansi(text)
     cursor = console.textCursor()
     cursor.movePosition(cursor.MoveOperation.End)
-    cursor.insertText(text.rstrip() + "\n")
+    cursor.insertText(clean.rstrip() + "\n")
     scroll_console_to_bottom(console)
 
 
