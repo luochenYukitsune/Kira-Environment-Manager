@@ -17,7 +17,7 @@ from qfluentwidgets import (
 
 from kira_env_manager.utils.python_env import (
     detect_python, get_python_download_urls, create_venv,
-    install_requirements, is_venv,
+    install_requirements, is_venv, check_dependencies_installed,
 )
 from kira_env_manager.utils.pip_mirrors import (
     MIRRORS, test_all_mirrors, safe_mirror_index,
@@ -54,7 +54,6 @@ class MirrorTestWorker(QThread):
                 f"  {n}: {'%.0f ms' % l if l else '超时'}\n"
             )
         )
-        # 从已测结果中取最快，不重复测速
         if results and results[0][2] is not None:
             best_name, best_url, best_latency = results[0]
             best_idx = next(
@@ -92,7 +91,22 @@ class InstallWorker(QThread):
         self.finished.emit(ok, msg)
 
 
+class DepCheckWorker(QThread):
+    finished = pyqtSignal(bool, list)
+
+    def __init__(self, venv_path, req_path):
+        super().__init__()
+        self.venv_path = venv_path
+        self.req_path = req_path
+
+    def run(self):
+        all_ok, missing, _ = check_dependencies_installed(self.venv_path, self.req_path)
+        self.finished.emit(all_ok, missing)
+
+
 class EnvPage(QScrollArea):
+    dependencies_changed = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("envPage")
@@ -100,6 +114,7 @@ class EnvPage(QScrollArea):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         self._worker = None
+        self._dep_worker = None
         self._tooltip = None
 
         container = QWidget(self)
@@ -108,7 +123,6 @@ class EnvPage(QScrollArea):
         layout.setContentsMargins(*PAGE_MARGINS)
         layout.setSpacing(16)
 
-        # 标题
         header = QHBoxLayout()
         header.addWidget(SubtitleLabel("环境配置", container))
         header.addStretch()
@@ -126,7 +140,6 @@ class EnvPage(QScrollArea):
 
         layout.addWidget(self.python_group)
 
-        # Python 下载链接
         self.download_widget = QWidget(container)
         dl = QVBoxLayout(self.download_widget)
         dl.setContentsMargins(0, 0, 0, 0)
@@ -188,6 +201,11 @@ class EnvPage(QScrollArea):
         self.install_card.clicked.connect(self._install_deps)
         self.deps_group.addSettingCard(self.install_card)
 
+        # 依赖状态标签
+        self._dep_status_label = BodyLabel("", container)
+        self._dep_status_label.setVisible(False)
+        layout.addWidget(self._dep_status_label)
+
         layout.addWidget(self.deps_group)
 
         # === 字体设置 ===
@@ -225,6 +243,38 @@ class EnvPage(QScrollArea):
         layout.addStretch(1)
 
         self._auto_detect()
+        self._refresh_dep_status()
+
+    def _refresh_dep_status(self):
+        """刷新依赖状态显示"""
+        project_path = cfg_get("project_path")
+        venv_path = cfg_get("venv_path")
+        if not project_path or not venv_path or not is_venv(venv_path):
+            self._dep_status_label.setVisible(False)
+            return
+
+        req_path = os.path.join(project_path, "requirements.txt")
+        if not os.path.exists(req_path):
+            self._dep_status_label.setVisible(False)
+            return
+
+        if self._dep_worker and self._dep_worker.isRunning():
+            self._dep_worker.terminate()
+            self._dep_worker.wait(2000)
+
+        self._dep_worker = DepCheckWorker(venv_path, req_path)
+        self._dep_worker.finished.connect(self._on_dep_check_done)
+        self._dep_worker.start()
+
+    def _on_dep_check_done(self, all_ok, missing):
+        if all_ok:
+            self._dep_status_label.setText("✅ 依赖全部已安装")
+            self._dep_status_label.setStyleSheet("color: #4caf50;")
+        else:
+            count = len(missing)
+            self._dep_status_label.setText(f"⚠️ 缺失 {count} 个依赖: {', '.join(missing[:5])}{'…' if count > 5 else ''}")
+            self._dep_status_label.setStyleSheet("color: #f44336;")
+        self._dep_status_label.setVisible(True)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -235,6 +285,7 @@ class EnvPage(QScrollArea):
         else:
             self.venv_card.setTitle("创建虚拟环境")
             self.venv_card.setContent("venv 目录不存在，将在安装时创建")
+        self._refresh_dep_status()
 
     def _auto_detect(self):
         v, p = detect_python()
@@ -258,34 +309,23 @@ class EnvPage(QScrollArea):
             self.download_widget.setVisible(True)
             notify_warning("未检测到 Python", "请先安装 Python 3.10+", parent=self)
 
-    # ---- 字体设置 ----
-
     def _choose_font(self):
-        """打开文件对话框选择 TTF 字体"""
         path, _ = QFileDialog.getOpenFileName(
             self, "选择字体文件", "",
             "TrueType 字体 (*.ttf);;所有文件 (*)",
         )
         if not path:
             return
-
-        # 尝试验证字体文件
         font_id = QFontDatabase.addApplicationFont(path)
         if font_id < 0:
             notify_error("无效字体", "所选文件不是有效的 TrueType 字体", parent=self)
             return
-
         family = QFontDatabase.applicationFontFamilies(font_id)[0]
         cfg_set("font_path", path)
         self.font_card.setContent(Path(path).name)
-        notify_success(
-            "字体已设置",
-            f"已切换到: {family}\n重启应用后生效",
-            parent=self, duration=4000,
-        )
+        notify_success("字体已设置", f"已切换到: {family}\n重启应用后生效", parent=self, duration=4000)
 
     def _reset_font(self):
-        """恢复内置默认字体"""
         cfg_set("font_path", "")
         self.font_card.setContent("HarmonyOS Sans（内置默认）")
         notify_info("字体已重置", "已恢复内置默认字体，重启应用后生效", parent=self, duration=3000)
@@ -306,15 +346,12 @@ class EnvPage(QScrollArea):
     def _speed_test(self):
         self.console.clear()
         self.speedtest_card.setEnabled(False)
-
         if self._worker and self._worker.isRunning():
             self._worker.terminate()
             self._worker.wait(2000)
-
         self._tooltip = StateToolTip("正在测速", "测试各镜像源响应...", self.window())
         self._tooltip.move(self._tooltip.getSuitablePos())
         self._tooltip.show()
-
         self._worker = MirrorTestWorker()
         self._worker.progress.connect(self._on_speed_progress)
         self._worker.finished.connect(self._on_speed_done)
@@ -329,7 +366,6 @@ class EnvPage(QScrollArea):
             self._tooltip.setContent(f"最快: {best_name}")
             self._tooltip.setState(True)
             self._tooltip = None
-
         cfg_set("mirror_index", best_idx)
         self.mirror_card.setContent(f"{best_name}  -  点击切换")
         notify_success("测速完成", f"已自动选择: {best_name}", parent=self)
@@ -339,22 +375,17 @@ class EnvPage(QScrollArea):
         if not project_path:
             notify_warning("提示", "请先在项目管理页设置项目路径", parent=self)
             return
-
         venv_path = os.path.join(project_path, "venv")
         if os.path.exists(venv_path):
             notify_warning("提示", f"虚拟环境已存在: {venv_path}", parent=self)
             return
-
         self.venv_card.setEnabled(False)
-
         if self._worker and self._worker.isRunning():
             self._worker.terminate()
             self._worker.wait(2000)
-
         self._tooltip = StateToolTip("正在创建虚拟环境", "请稍候...", self.window())
         self._tooltip.move(self._tooltip.getSuitablePos())
         self._tooltip.show()
-
         self._worker = VenvWorker(venv_path)
         self._worker.finished.connect(self._on_venv_created)
         self._worker.start()
@@ -365,7 +396,6 @@ class EnvPage(QScrollArea):
             self._tooltip.setContent(msg)
             self._tooltip.setState(True)
             self._tooltip = None
-
         if ok:
             venv_path = os.path.join(cfg_get("project_path") or "", "venv")
             if not cfg_get("venv_path"):
@@ -376,6 +406,7 @@ class EnvPage(QScrollArea):
         else:
             logger.error(f"venv 创建失败: {msg}")
             notify_error("失败", msg, parent=self)
+        self._refresh_dep_status()
 
     def _select_venv(self):
         path = QFileDialog.getExistingDirectory(self, "选择虚拟环境目录")
@@ -388,9 +419,9 @@ class EnvPage(QScrollArea):
             notify_success("已设置", f"使用虚拟环境: {path}", parent=self)
         else:
             notify_error("无效", "所选目录不是有效的虚拟环境", parent=self)
+        self._refresh_dep_status()
 
     def _validate_env(self, project_path, venv_path):
-        """验证项目路径、venv 和 requirements.txt"""
         if not project_path:
             notify_warning("提示", "请先在项目管理页设置项目路径", parent=self)
             return False
@@ -404,7 +435,6 @@ class EnvPage(QScrollArea):
         return req_path
 
     def _choose_mirror_for_install(self):
-        """弹出镜像选择对话框，返回 (primary, fallback, mirror_name) 或 None（仅用于依赖安装时选择）"""
         reply = QMessageBox.question(
             self, "选择镜像源",
             "如何选择 pip 镜像源？\n\n"
@@ -415,7 +445,6 @@ class EnvPage(QScrollArea):
         )
         if reply == QMessageBox.Cancel:
             return None
-
         if reply == QMessageBox.No:
             items = [f"{m[0]}  -  {m[2]}" for m in MIRRORS]
             current = safe_mirror_index(cfg_get("mirror_index") or 0)
@@ -430,34 +459,27 @@ class EnvPage(QScrollArea):
             mirror_name = MIRRORS[idx][0]
         else:
             primary, fallback, mirror_name = get_mirror_for_install()
-
         return primary, fallback, mirror_name
 
     def _install_deps(self):
         project_path = cfg_get("project_path")
         venv_path = cfg_get("venv_path")
-
         req_path = self._validate_env(project_path, venv_path)
         if not req_path:
             return
-
         mirror = self._choose_mirror_for_install()
         if not mirror:
             return
         primary, fallback, mirror_name = mirror
-
         self.console.clear()
         self.console.append(f">>> 使用镜像: {mirror_name}\n")
         self.install_card.setEnabled(False)
-
         if self._worker and self._worker.isRunning():
             self._worker.terminate()
             self._worker.wait(2000)
-
         self._tooltip = StateToolTip("正在安装依赖", "请稍候...", self.window())
         self._tooltip.move(self._tooltip.getSuitablePos())
         self._tooltip.show()
-
         self._worker = InstallWorker(venv_path, req_path, primary, fallback)
         self._worker.line_output.connect(self._on_line)
         self._worker.finished.connect(self._on_install_done)
@@ -474,6 +496,9 @@ class EnvPage(QScrollArea):
             self._tooltip = None
         if ok:
             notify_success("成功", msg, parent=self)
+            # 通过信号通知启动管理页刷新卡片依赖状态
+            self.dependencies_changed.emit()
         else:
             logger.error(f"依赖安装失败: {msg}")
             notify_error("失败", msg, parent=self)
+        self._refresh_dep_status()
