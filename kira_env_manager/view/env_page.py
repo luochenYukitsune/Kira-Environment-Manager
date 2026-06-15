@@ -91,8 +91,21 @@ class InstallWorker(QThread):
         self.finished.emit(ok, msg)
 
 
-class EnvPage(QScrollArea):
+class DepCheckWorker(QThread):
+    finished = pyqtSignal(bool, list)
 
+    def __init__(self, venv_path, req_path):
+        super().__init__()
+        self.venv_path = venv_path
+        self.req_path = req_path
+
+    def run(self):
+        all_ok, missing, _ = check_dependencies_installed(self.venv_path, self.req_path)
+        self.finished.emit(all_ok, missing)
+
+
+class EnvPage(QScrollArea):
+    dependencies_changed = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -101,6 +114,7 @@ class EnvPage(QScrollArea):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         self._worker = None
+        self._dep_worker = None
         self._tooltip = None
 
         container = QWidget(self)
@@ -244,15 +258,23 @@ class EnvPage(QScrollArea):
             self._dep_status_label.setVisible(False)
             return
 
-        all_ok, missing, _ = check_dependencies_installed(venv_path, req_path)
+        if self._dep_worker and self._dep_worker.isRunning():
+            self._dep_worker.terminate()
+            self._dep_worker.wait(2000)
+
+        self._dep_worker = DepCheckWorker(venv_path, req_path)
+        self._dep_worker.finished.connect(self._on_dep_check_done)
+        self._dep_worker.start()
+
+    def _on_dep_check_done(self, all_ok, missing):
         if all_ok:
-                self._dep_status_label.setText("✅ 依赖全部已安装")
-                self._dep_status_label.setStyleSheet("color: #4caf50;")
-            else:
-                count = len(missing)
-                self._dep_status_label.setText(f"⚠️ 缺失 {count} 个依赖: {', '.join(missing[:5])}{'…' if count > 5 else ''}")
-                self._dep_status_label.setStyleSheet("color: #f44336;")
-            self._dep_status_label.setVisible(True)
+            self._dep_status_label.setText("✅ 依赖全部已安装")
+            self._dep_status_label.setStyleSheet("color: #4caf50;")
+        else:
+            count = len(missing)
+            self._dep_status_label.setText(f"⚠️ 缺失 {count} 个依赖: {', '.join(missing[:5])}{'…' if count > 5 else ''}")
+            self._dep_status_label.setStyleSheet("color: #f44336;")
+        self._dep_status_label.setVisible(True)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -474,14 +496,8 @@ class EnvPage(QScrollArea):
             self._tooltip = None
         if ok:
             notify_success("成功", msg, parent=self)
-            # 通知启动管理页刷新卡片依赖状态
+            # 通过信号通知启动管理页刷新卡片依赖状态
             self.dependencies_changed.emit()
-            try:
-                w = self.window()
-                if w and hasattr(w, "launch_page"):
-                    w.launch_page._refresh_all_cards_deps()
-            except Exception as e:
-                logger.warning(f"刷新启动管理页卡片失败: {e}", exc_info=True)
         else:
             logger.error(f"依赖安装失败: {msg}")
             notify_error("失败", msg, parent=self)
