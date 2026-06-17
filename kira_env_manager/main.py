@@ -22,11 +22,15 @@ from kira_env_manager.view.main_window import MainWindow
 
 
 def _init_surface_format():
-    """配置 OpenGL 硬件加速渲染后端 —— 必须在 QApplication 之前调用"""
+    """配置渲染后端 —— 必须在 QApplication 之前调用
+
+    不强制指定 OpenGL renderableType，让 Qt 使用原生后端：
+    Windows 走 GDI/DirectWrite，macOS 走 Metal/CoreGraphics。
+    仅在需要 QOpenGLWidget / QtWebEngine 时才需要指定 OpenGL。
+    """
     fmt = QSurfaceFormat()
     fmt.setSwapBehavior(QSurfaceFormat.DoubleBuffer)
-    fmt.setSwapInterval(1)  # vsync
-    fmt.setRenderableType(QSurfaceFormat.OpenGL)
+    fmt.setSwapInterval(1)
     QSurfaceFormat.setDefaultFormat(fmt)
 
 

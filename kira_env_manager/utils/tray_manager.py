@@ -62,7 +62,7 @@ class TrayManager(QSystemTrayIcon):
         if instances:
             inst_menu = self._menu.addMenu("实例列表")
             for inst in instances:
-                running = inst.is_running()
+                running = inst._pm.is_running()
                 icon = "●" if running else "○"
                 label = f"{icon} {inst.name} (: {inst.port})"
                 action = inst_menu.addAction(label)

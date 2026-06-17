@@ -44,7 +44,10 @@ from kira_env_manager.utils.logger import (
 )
 from kira_env_manager.common.config import get as cfg_get, set_config as cfg_set, full as cfg_full, save_full
 from kira_env_manager.view.config_page import ConfigDialog
-from kira_env_manager.common.constants import PAGE_MARGINS, BUTTON_HEIGHT_MEDIUM, BUTTON_HEIGHT_SMALL
+from kira_env_manager.common.constants import (
+    PAGE_MARGINS, BUTTON_HEIGHT_MEDIUM, BUTTON_HEIGHT_SMALL,
+    MAX_DISPLAY_LINES,
+)
 
 
 def _remove_readonly(func, path, exc_info):
@@ -511,11 +514,8 @@ class InstanceCard(CardWidget):
         btn_row.addWidget(remove_btn)
         layout.addLayout(btn_row)
 
-        # 定时端口检测 - 准确判断是否在运行
-        self._port_check_timer = QTimer(self)
-        self._port_check_timer.timeout.connect(self._check_port_status)
-        self._port_check_timer.start(2000)  # 每2秒检测一次
-        QTimer.singleShot(200, self._check_port_status)  # 立即检测一次
+        # 状态由 _rebuild_cards 通过 PM 信号驱动更新，不做定时轮询端口
+        # 每 2 秒 TCP 探测会在 UI 线程累积阻塞，改为被动驱动
 
     def _on_deps_checked(self, ok, missing, msg):
         self.deps_ok = ok
@@ -536,24 +536,21 @@ class InstanceCard(CardWidget):
             venv_path = project_venv if is_venv(project_venv) else ""
         project_path = self.inst.project_path or cfg_get("project_path")
         if self._deps_worker and self._deps_worker.isRunning():
-            self._deps_worker.quit()
-            self._deps_worker.wait(1000)
+            return
         self.deps_label.setText("依赖: 检查中...")
         self._deps_worker = _DepsCheckWorker(venv_path, project_path, self)
         self._deps_worker.finished.connect(self._on_deps_checked)
         self._deps_worker.start()
 
     def _on_port_changed(self, new_port):
-        """端口变更时刷新显示和状态检测"""
+        """端口变更时刷新显示"""
         self.port_label.setText(f"端口: {new_port}")
-        # 立即做一次端口检测
-        QTimer.singleShot(500, self._check_port_status)
 
     def _check_port_status(self):
         """通过撞端口检测实例是否在运行"""
         port = self.inst.port
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+            with socket.create_connection(("127.0.0.1", port), timeout=0.1):
                 is_running = True
         except (ConnectionRefusedError, TimeoutError, OSError):
             is_running = False
@@ -575,14 +572,7 @@ class InstanceCard(CardWidget):
         self.stop_btn.setEnabled(running)
 
     def cleanup(self):
-        """销毁前调用：断开定时器、停止后台线程，避免资源泄漏"""
-        # 断开信号连接防止 timer 在对象析构过程中触发
-        try:
-            self._port_check_timer.timeout.disconnect(self._check_port_status)
-        except TypeError:
-            pass  # 信号已断开或从未连接
-        self._port_check_timer.stop()
-        # 等待后台线程结束
+        """销毁前调用：停止后台线程，避免资源泄漏"""
         if self._deps_worker and self._deps_worker.isRunning():
             self._deps_worker.quit()
             self._deps_worker.wait(3000)
@@ -682,6 +672,7 @@ class LaunchPage(QScrollArea):
         _cf = self.console.font()
         _cf.setFamilies(["Microsoft YaHei UI", "Segoe UI", "Arial", "sans-serif"])
         self.console.setFont(_cf)
+        self.console.document().setMaximumBlockCount(MAX_DISPLAY_LINES)
         self.console.setPlaceholderText("选择实例后点击启动...")
         layout.addWidget(self.console, 1)
 
@@ -692,6 +683,10 @@ class LaunchPage(QScrollArea):
         self._im.instances_changed.connect(self._rebuild_cards)
         self._im.instances_changed.connect(self._update_filter_options)
         self._im.any_output.connect(self._on_any_output)
+        self._pending_console_lines = []
+        self._console_flush_timer = QTimer(self)
+        self._console_flush_timer.setSingleShot(True)
+        self._console_flush_timer.timeout.connect(self._flush_console_lines)
 
         saved = cfg_get("instances") or []
         if saved:
@@ -974,11 +969,15 @@ class LaunchPage(QScrollArea):
             cached_ids = getattr(self, '_cached_instance_ids', set())
 
             if current_ids == cached_ids and len(instances) == self.cards_layout.count():
-                # 仅状态变化，立即刷新所有卡片的端口检测状态
+                # 仅状态变化时使用进程管理器内存状态，避免 UI 线程同步端口探测。
                 for i in range(self.cards_layout.count()):
                     item = self.cards_layout.itemAt(i)
                     if item and isinstance(item.widget(), InstanceCard):
-                        item.widget()._check_port_status()
+                        card = item.widget()
+                        running = card.inst._pm.is_running()
+                        if running != card._is_running:
+                            card._is_running = running
+                            card._update_running_ui(running)
                 self._update_running_label()
                 return
 
@@ -1241,13 +1240,13 @@ class LaunchPage(QScrollArea):
 
     def _start_all(self):
         for inst in self._im.instances():
-            if not inst.is_running():
+            if not inst._pm.is_running():
                 self._on_start(inst)
 
     def _stop_all(self):
         for inst in self._im.instances():
-            if inst.is_running():
-                inst.stop()
+            inst.stop()
+        self._update_running_label()
 
     def _update_running_label(self):
         total = self._im.count()
@@ -1280,11 +1279,23 @@ class LaunchPage(QScrollArea):
                 self._log_buffers["通用"] = []
             self._log_buffers["通用"].append(display_line)
 
-        # 根据过滤条件显示
+        # 根据过滤条件批量显示，避免高频逐行刷新 TextBrowser 卡住 UI
         if self._current_filter == "全部实例":
-            append_and_scroll(self.console, display_line)
+            self._queue_console_line(display_line)
         elif inst_name and self._current_filter == inst_name:
-            append_and_scroll(self.console, display_line)
+            self._queue_console_line(display_line)
+
+    def _queue_console_line(self, line):
+        self._pending_console_lines.append(line)
+        if not self._console_flush_timer.isActive():
+            self._console_flush_timer.start(100)
+
+    def _flush_console_lines(self):
+        if not self._pending_console_lines:
+            return
+        text = "".join(self._pending_console_lines)
+        self._pending_console_lines.clear()
+        append_and_scroll(self.console, text)
 
     def _on_filter_changed(self, index):
         """切换日志过滤"""

@@ -46,35 +46,35 @@ class InstanceCard(CardWidget):
         self.open_btn.clicked.connect(self._open_browser)
         layout.addWidget(self.open_btn)
 
-        # 初始状态
-        self._check_status()
-        # 定时检查状态
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._check_status)
-        self._timer.start(2000)
+        # 初始状态（使用 PM 内存状态，避免 UI 线程同步端口探测）
+        self._update_status(self.instance._pm.is_running())
+        # 绑定 state_changed 信号驱动状态更新
+        self.instance.state_changed.connect(self._update_status)
 
-    def _check_status(self):
-        """检查实例运行状态"""
-        running = check_port_open("127.0.0.1", self.instance.port)
-        if running != self._is_running:
-            self._is_running = running
-            if running:
-                self._status_label.setText(f"运行中  |  {self.url}")
-                self._status_label.setStyleSheet("color: #4caf50;")
-                self.open_btn.setEnabled(True)
-            else:
-                self._status_label.setText("未运行")
-                self._status_label.setStyleSheet("color: #f44336;")
-                self.open_btn.setEnabled(False)
+    def _update_status(self, running):
+        if running == self._is_running:
+            return
+        self._is_running = running
+        if running:
+            self._status_label.setText(f"运行中  |  {self.url}")
+            self._status_label.setStyleSheet("color: #4caf50;")
+            self.open_btn.setEnabled(True)
+        else:
+            self._status_label.setText("未运行")
+            self._status_label.setStyleSheet("color: #f44336;")
+            self.open_btn.setEnabled(False)
 
     def _open_browser(self):
         """在外部浏览器中打开"""
         if self._is_running:
             webbrowser.open(self.url)
 
-    def stop_timer(self):
-        """停止定时器"""
-        self._timer.stop()
+    def stop_card(self):
+        """断开信号避免悬空引用"""
+        try:
+            self.instance.state_changed.disconnect(self._update_status)
+        except TypeError:
+            pass
 
 
 class BrowserPage(QWidget):
@@ -153,7 +153,7 @@ class BrowserPage(QWidget):
         removed = [n for n in self._cards if n not in current_names]
         for n in removed:
             card = self._cards.pop(n)
-            card.stop_timer()
+            card.stop_card()
             self._card_layout.removeWidget(card)
             card.deleteLater()
 
@@ -193,4 +193,4 @@ class BrowserPage(QWidget):
         """清理定时器和卡片资源"""
         self._sync_timer.stop()
         for card in self._cards.values():
-            card.stop_timer()
+            card.stop_card()

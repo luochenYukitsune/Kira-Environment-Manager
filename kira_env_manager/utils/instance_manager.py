@@ -199,7 +199,8 @@ class InstanceManager(QObject):
         return len(self._instances)
 
     def running_count(self):
-        return sum(1 for inst in self._instances if inst.is_running())
+        """返回由 KEM 启动并仍在运行的实例数，避免 UI 线程同步端口探测。"""
+        return sum(1 for inst in self._instances if inst._pm.is_running())
 
     def running_instances(self):
         return [i for i in self._instances if i.is_running()]

@@ -92,8 +92,8 @@ def status_color(running_or_ok, dark=None):
         return "#9e9e9e" if dark else "#888"
 
 
-def check_port_open(host, port, timeout=0.3):
-    """检查端口是否开放（跨模块复用）"""
+def check_port_open(host, port, timeout=0.1):
+    """检查端口是否开放（跨模块复用）—— localhost 通常 <1ms，100ms 足够"""
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True

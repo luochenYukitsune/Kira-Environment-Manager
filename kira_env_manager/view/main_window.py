@@ -69,8 +69,7 @@ class MainWindow(FluentWindow):
             self.log_page, FIF.DOCUMENT, "日志",
             position=NavigationItemPosition.SCROLL,
         )
-
-        # 关闭导航栏 Acrylic 毛玻璃 —— paintEvent 每帧 gaussianBlur CPU 计算
+        # 关闭导航栏 Acrylic 毛玻璃
         self.navigationInterface.setAcrylicEnabled(False)
 
     def initWindow(self):
@@ -89,24 +88,21 @@ class MainWindow(FluentWindow):
         if screen:
             geo = screen.availableGeometry()
         else:
-            # 降级方案：使用 QApplication 的 desktopGeometry
             geo = QApplication.desktop().availableGeometry() if hasattr(QApplication, 'desktop') else None
             if geo is None:
-                return  # 无法获取屏幕信息，跳过居中
+                return
         self.move(
             (geo.width() - self.width()) // 2,
             (geo.height() - self.height()) // 2,
         )
 
     def changeEvent(self, event):
-        """拦截窗口状态变化：最小化时缩入系统托盘"""
         if event.type() == event.WindowStateChange:
             if self.windowState() & Qt.WindowMinimized:
                 QTimer.singleShot(100, self._minimize_to_tray)
         super().changeEvent(event)
 
     def _minimize_to_tray(self):
-        """隐藏窗口到托盘并显示通知"""
         self.hide()
         if hasattr(self, '_tray'):
             self._tray.show_minimize_notification()
@@ -128,8 +124,10 @@ class MainWindow(FluentWindow):
         self.stackedWidget.setCurrentWidget(target)
         self.navigationInterface.setCurrentItem(target.objectName())
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+
     def closeEvent(self, event):
-        """关闭窗口时：根据配置决定退出还是缩入托盘"""
         from PyQt5.QtWidgets import QCheckBox
         from kira_env_manager.utils.logger import logger
 
@@ -166,7 +164,6 @@ class MainWindow(FluentWindow):
             QTimer.singleShot(50, self._minimize_to_tray)
             return
 
-        # action == "exit" 或用户选择了退出: 正常退出流程
         if hasattr(self, 'launch_page'):
             cards_widget = getattr(self.launch_page, 'cards_widget', None)
             if cards_widget:
