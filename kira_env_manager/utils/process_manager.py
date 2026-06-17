@@ -2,6 +2,7 @@
 
 import subprocess
 import os
+import threading
 from PyQt5.QtCore import QObject, QThread, pyqtSignal
 
 
@@ -23,6 +24,10 @@ class _ProcessWorker(QThread):
             env = os.environ.copy()
             if self.env:
                 env.update(self.env)
+
+            # 强制子进程使用 UTF-8 输出，避免中文 Windows GBK 编码导致乱码
+            env.setdefault("PYTHONIOENCODING", "utf-8")
+            env.setdefault("PYTHONUTF8", "1")
 
             # Windows: CREATE_NO_WINDOW 防止弹出黑色控制台窗口
             # Linux/macOS: 不需要特殊标志
@@ -71,24 +76,28 @@ class _ProcessWorker(QThread):
         if not self._process or self._process.poll() is not None:
             return
 
-        try:
-            if os.name == 'nt':
-                # Windows: 使用 taskkill /T 终止进程树（supervisor 会启动子进程）
-                subprocess.run(
-                    ['taskkill', '/F', '/T', '/PID', str(self._process.pid)],
-                    capture_output=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                    timeout=5,
-                )
-            else:
-                self._process.terminate()
-                try:
-                    self._process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    self._process.kill()
-                    self._process.wait(timeout=2)
-        except Exception:
-            pass
+        pid = self._process.pid
+
+        def _terminate_process_tree():
+            try:
+                if os.name == 'nt':
+                    subprocess.run(
+                        ['taskkill', '/F', '/T', '/PID', str(pid)],
+                        capture_output=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                        timeout=5,
+                    )
+                else:
+                    self._process.terminate()
+                    try:
+                        self._process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        self._process.kill()
+                        self._process.wait(timeout=2)
+            except Exception:
+                pass
+
+        threading.Thread(target=_terminate_process_tree, daemon=True).start()
 
 
 class ProcessManager(QObject):
@@ -152,18 +161,21 @@ class ProcessManager(QObject):
         return True
 
     def stop(self):
-        """停止进程 — 强制终止，不依赖 _running 标志位（防止上次 stop 失败后无法重试）"""
+        """停止进程 — 强制终止，不阻塞主线程
+
+        taskkill /F 通常瞬间完成；进程结束后由 process_finished 信号
+        异步处理 _running 状态和清理，无需在 UI 线程中 wait()。
+        """
         if not self._worker:
             return
 
+        was_running = self._running
         self.output_received.emit("\n>>> 正在停止进程...\n")
         self._worker.stop()
-        # 不阻塞主线程：stop() 已经 taskkill /F，进程几乎瞬间结束
-        # 500ms 等待足以覆盖绝大多数情况，超时后由 finished 信号处理清理
-        if self._worker.isRunning():
-            self._worker.wait(500)
         self._running = False
-        self.state_changed.emit(False)
+        # 仅在状态真正变化时才通知外部，避免无意义的卡片重建
+        if was_running:
+            self.state_changed.emit(False)
 
     def wait_for_stop(self, timeout=3000):
         if self._worker and self._worker.isRunning():
