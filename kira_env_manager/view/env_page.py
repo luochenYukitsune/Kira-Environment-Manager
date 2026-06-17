@@ -113,7 +113,9 @@ class EnvPage(QScrollArea):
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        self._worker = None
+        self._speedtest_worker = None
+        self._venv_worker = None
+        self._install_worker = None
         self._dep_worker = None
         self._tooltip = None
 
@@ -259,8 +261,9 @@ class EnvPage(QScrollArea):
             return
 
         if self._dep_worker and self._dep_worker.isRunning():
-            self._dep_worker.terminate()
-            self._dep_worker.wait(2000)
+            self._dep_worker.requestInterruption()
+            self._dep_worker.quit()
+            self._dep_worker.wait(3000)
 
         self._dep_worker = DepCheckWorker(venv_path, req_path)
         self._dep_worker.finished.connect(self._on_dep_check_done)
@@ -320,7 +323,11 @@ class EnvPage(QScrollArea):
         if font_id < 0:
             notify_error("无效字体", "所选文件不是有效的 TrueType 字体", parent=self)
             return
-        family = QFontDatabase.applicationFontFamilies(font_id)[0]
+        families = QFontDatabase.applicationFontFamilies(font_id)
+        if not families:
+            notify_error("字体错误", "无法获取字体族名称", parent=self)
+            return
+        family = families[0]
         cfg_set("font_path", path)
         self.font_card.setContent(Path(path).name)
         notify_success("字体已设置", f"已切换到: {family}\n重启应用后生效", parent=self, duration=4000)
@@ -346,21 +353,34 @@ class EnvPage(QScrollArea):
     def _speed_test(self):
         self.console.clear()
         self.speedtest_card.setEnabled(False)
-        if self._worker and self._worker.isRunning():
-            self._worker.terminate()
-            self._worker.wait(2000)
+        # Cancel any running tasks
+        for attr in ['_venv_worker', '_install_worker']:
+            w = getattr(self, attr)
+            if w and w.isRunning():
+                w.requestInterruption()
+                w.quit()
+                w.wait(3000)
+                setattr(self, attr, None)
+        # Cancel previous speed test
+        if self._speedtest_worker and self._speedtest_worker.isRunning():
+            self._speedtest_worker.requestInterruption()
+            self._speedtest_worker.quit()
+            self._speedtest_worker.wait(3000)
         self._tooltip = StateToolTip("正在测速", "测试各镜像源响应...", self.window())
         self._tooltip.move(self._tooltip.getSuitablePos())
         self._tooltip.show()
-        self._worker = MirrorTestWorker()
-        self._worker.progress.connect(self._on_speed_progress)
-        self._worker.finished.connect(self._on_speed_done)
-        self._worker.start()
+        self._speedtest_worker = MirrorTestWorker()
+        self._speedtest_worker.progress.connect(self._on_speed_progress)
+        self._speedtest_worker.finished.connect(self._on_speed_done)
+        self._speedtest_worker.start()
 
     def _on_speed_progress(self, line):
         append_and_scroll(self.console, line)
 
     def _on_speed_done(self, best_idx, best_name, best_url):
+        if self._speedtest_worker is None:
+            return  # abandoned
+        self._speedtest_worker = None
         self.speedtest_card.setEnabled(True)
         if self._tooltip:
             self._tooltip.setContent(f"最快: {best_name}")
@@ -380,17 +400,30 @@ class EnvPage(QScrollArea):
             notify_warning("提示", f"虚拟环境已存在: {venv_path}", parent=self)
             return
         self.venv_card.setEnabled(False)
-        if self._worker and self._worker.isRunning():
-            self._worker.terminate()
-            self._worker.wait(2000)
+        # Cancel conflicting tasks
+        for attr in ['_speedtest_worker', '_install_worker']:
+            w = getattr(self, attr)
+            if w and w.isRunning():
+                w.requestInterruption()
+                w.quit()
+                w.wait(3000)
+                setattr(self, attr, None)
+        # Cancel previous venv worker
+        if self._venv_worker and self._venv_worker.isRunning():
+            self._venv_worker.requestInterruption()
+            self._venv_worker.quit()
+            self._venv_worker.wait(3000)
         self._tooltip = StateToolTip("正在创建虚拟环境", "请稍候...", self.window())
         self._tooltip.move(self._tooltip.getSuitablePos())
         self._tooltip.show()
-        self._worker = VenvWorker(venv_path)
-        self._worker.finished.connect(self._on_venv_created)
-        self._worker.start()
+        self._venv_worker = VenvWorker(venv_path)
+        self._venv_worker.finished.connect(self._on_venv_created)
+        self._venv_worker.start()
 
     def _on_venv_created(self, ok, msg):
+        if self._venv_worker is None:
+            return  # abandoned
+        self._venv_worker = None
         self.venv_card.setEnabled(True)
         if self._tooltip:
             self._tooltip.setContent(msg)
@@ -422,17 +455,15 @@ class EnvPage(QScrollArea):
         self._refresh_dep_status()
 
     def _validate_env(self, project_path, venv_path):
+        """Validate env setup. Returns (ok, message_or_req_path)."""
         if not project_path:
-            notify_warning("提示", "请先在项目管理页设置项目路径", parent=self)
-            return False
+            return False, "请先在项目管理页设置项目路径"
         if not venv_path or not is_venv(venv_path):
-            notify_warning("提示", "请先创建或选择虚拟环境", parent=self)
-            return False
+            return False, "请先创建或选择虚拟环境"
         req_path = os.path.join(project_path, "requirements.txt")
         if not os.path.exists(req_path):
-            notify_error("错误", f"找不到: {req_path}", parent=self)
-            return False
-        return req_path
+            return False, f"找不到: {req_path}"
+        return True, req_path
 
     def _choose_mirror_for_install(self):
         reply = QMessageBox.question(
@@ -464,9 +495,11 @@ class EnvPage(QScrollArea):
     def _install_deps(self):
         project_path = cfg_get("project_path")
         venv_path = cfg_get("venv_path")
-        req_path = self._validate_env(project_path, venv_path)
-        if not req_path:
+        ok, req_path_or_msg = self._validate_env(project_path, venv_path)
+        if not ok:
+            notify_warning("提示", req_path_or_msg, parent=self)
             return
+        req_path = req_path_or_msg
         mirror = self._choose_mirror_for_install()
         if not mirror:
             return
@@ -474,21 +507,34 @@ class EnvPage(QScrollArea):
         self.console.clear()
         self.console.append(f">>> 使用镜像: {mirror_name}\n")
         self.install_card.setEnabled(False)
-        if self._worker and self._worker.isRunning():
-            self._worker.terminate()
-            self._worker.wait(2000)
+        # Cancel conflicting tasks
+        for attr in ['_speedtest_worker', '_venv_worker']:
+            w = getattr(self, attr)
+            if w and w.isRunning():
+                w.requestInterruption()
+                w.quit()
+                w.wait(3000)
+                setattr(self, attr, None)
+        # Cancel previous install worker
+        if self._install_worker and self._install_worker.isRunning():
+            self._install_worker.requestInterruption()
+            self._install_worker.quit()
+            self._install_worker.wait(3000)
         self._tooltip = StateToolTip("正在安装依赖", "请稍候...", self.window())
         self._tooltip.move(self._tooltip.getSuitablePos())
         self._tooltip.show()
-        self._worker = InstallWorker(venv_path, req_path, primary, fallback)
-        self._worker.line_output.connect(self._on_line)
-        self._worker.finished.connect(self._on_install_done)
-        self._worker.start()
+        self._install_worker = InstallWorker(venv_path, req_path, primary, fallback)
+        self._install_worker.line_output.connect(self._on_line)
+        self._install_worker.finished.connect(self._on_install_done)
+        self._install_worker.start()
 
     def _on_line(self, line):
         append_and_scroll(self.console, line)
 
     def _on_install_done(self, ok, msg):
+        if self._install_worker is None:
+            return  # abandoned
+        self._install_worker = None
         self.install_card.setEnabled(True)
         if self._tooltip:
             self._tooltip.setContent(msg)

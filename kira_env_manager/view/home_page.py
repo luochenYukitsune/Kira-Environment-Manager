@@ -1,6 +1,7 @@
 """首页 - 状态概览仪表盘"""
 
-from PyQt5.QtCore import Qt
+from PyQt5 import sip
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFrame
 
 from qfluentwidgets import (
@@ -9,12 +10,23 @@ from qfluentwidgets import (
     FluentIcon as FIF, setFont,
 )
 
-from kira_env_manager.utils.python_env import detect_python
 from kira_env_manager.utils.project import (
-    check_kira_version, is_kira_project, check_git_installed,
+    check_kira_version, is_kira_project,
 )
 from kira_env_manager.utils.helpers import status_color, get_project_path_fallback
 from kira_env_manager.common.constants import PAGE_MARGINS
+
+
+class _StatusCheckWorker(QThread):
+    """后台线程：检测 Python / Git 状态，避免 UI 卡顿"""
+    finished = pyqtSignal(str, str, str)  # python_version, python_path, git_version
+
+    def run(self):
+        from kira_env_manager.utils.python_env import detect_python
+        from kira_env_manager.utils.project import check_git_installed
+        py_ver, py_path = detect_python()
+        git_ver = check_git_installed() or "未安装"
+        self.finished.emit(py_ver, py_path, git_ver)
 
 
 class StatusCard(CardWidget):
@@ -115,7 +127,32 @@ class HomePage(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.refresh_status()
+        QTimer.singleShot(0, self._async_refresh_status)
+
+    def _async_refresh_status(self):
+        """非阻塞刷新：将耗时检测（Python/Git）放到后台线程"""
+        # 同步部分：不需要子进程的状态
+        self._refresh_nonblocking_status()
+
+        # 异步部分：需要调用子进程的检测
+        worker = _StatusCheckWorker(self)
+        worker.finished.connect(self._on_status_ready, Qt.QueuedConnection)
+        worker.start()
+
+    def _on_status_ready(self, py_ver, py_path, git_ver):
+        """后台检测完成回调"""
+        if sip.isdeleted(self):
+            return
+
+        if py_ver and py_ver != "未检测到":
+            self.python_card.set_value(f"Python {py_ver}", status_color(True))
+        else:
+            self.python_card.set_value("未检测到", status_color(False))
+
+        if git_ver and git_ver != "未安装":
+            self.git_card.set_value(git_ver, status_color(True))
+        else:
+            self.git_card.set_value("未安装", status_color(False))
 
     def _navigate(self, route_key):
         w = self.window()
@@ -129,14 +166,8 @@ class HomePage(QWidget):
         else:
             self.run_card.set_value("未运行", status_color(None))
 
-    def refresh_status(self):
-
-        # Python（仅首次检测，运行时不会变）
-        v, _ = detect_python()
-        if v:
-            self.python_card.set_value(f"Python {v}", status_color(True))
-        else:
-            self.python_card.set_value("未检测到", status_color(False))
+    def _refresh_nonblocking_status(self):
+        """刷新不需要子进程的状态（KiraAI 项目检测、运行状态）"""
 
         # KiraAI
         path = get_project_path_fallback()
@@ -146,16 +177,16 @@ class HomePage(QWidget):
         else:
             self.kira_card.set_value("未安装", status_color("warn"))
 
-        # Git
-        gv = check_git_installed()
-        if gv:
-            self.git_card.set_value(gv, status_color(True))
-        else:
-            self.git_card.set_value("未安装", status_color(False))
-
         # 运行状态 - 从启动页读取
         w = self.window()
         if w and hasattr(w, "launch_page") and hasattr(w.launch_page, "running_count"):
             self.update_running_status(w.launch_page.running_count())
         else:
             self.run_card.set_value("未运行", status_color(None))
+
+    def refresh_status(self):
+        """公开接口：同步刷新非阻塞部分 + 异步刷新子进程部分"""
+        self._refresh_nonblocking_status()
+        worker = _StatusCheckWorker(self)
+        worker.finished.connect(self._on_status_ready, Qt.QueuedConnection)
+        worker.start()

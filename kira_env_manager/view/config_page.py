@@ -5,7 +5,7 @@ import os
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
-    QInputDialog, QDialog,
+    QInputDialog, QDialog, QMessageBox,
 )
 
 from qfluentwidgets import (
@@ -142,6 +142,10 @@ class ConfigDialog(QDialog):
                 self._cards[key].setContent(str(val))
             # 同步更新 instance.cfg 中的端口，使 InstanceCard 显示更新
             if key == "port" and self.instance:
+                if self.instance.is_running():
+                    QMessageBox.warning(self, "无法修改", "实例正在运行中，请先停止再修改端口")
+                    logger.warning("Blocked port change for running instance: %s (port %d)", self.instance.name, self.instance.port)
+                    return
                 self.instance.cfg["port"] = val
                 # 新增: 通知卡片刷新端口显示和状态检测
                 self.instance.port_changed.emit(val)

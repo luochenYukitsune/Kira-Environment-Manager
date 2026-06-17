@@ -149,7 +149,13 @@ class InstanceManager(QObject):
             # worker 未能及时结束：连接 finished 信号延迟清理，但仍从列表移除
             # finished 最多触发一次，lambda 持有 inst 引用是安全的（不会被重复 deleteLater）
             inst._pm._worker.finished.connect(lambda: inst.deleteLater())
+            if hasattr(inst._pm, '_worker') and inst._pm._worker:
+                inst._pm._worker.finished.connect(lambda: inst._pm._worker.deleteLater())
         else:
+            if hasattr(inst, '_pm') and inst._pm:
+                inst._pm.deleteLater()
+            if hasattr(inst._pm, '_worker') and inst._pm._worker:
+                inst._pm._worker.deleteLater()
             inst.deleteLater()
 
         if self._active_instance is inst:
@@ -176,6 +182,10 @@ class InstanceManager(QObject):
             # stop() 已处理终止逻辑，这里只做最终等待
             if inst._pm._worker and inst._pm._worker.isRunning():
                 inst._pm.wait_for_stop(1000)
+            if hasattr(inst, '_pm') and inst._pm:
+                inst._pm.deleteLater()
+            if hasattr(inst._pm, '_worker') and inst._pm._worker:
+                inst._pm._worker.deleteLater()
             inst.deleteLater()
         self._instances.clear()
         self._active_instance = None
@@ -203,7 +213,7 @@ class InstanceManager(QObject):
         return sum(1 for inst in self._instances if inst._pm.is_running())
 
     def running_instances(self):
-        return [i for i in self._instances if i.is_running()]
+        return [inst for inst in self._instances if inst._pm and inst._pm.is_running()]
 
     def set_active(self, instance):
         self._active_instance = instance

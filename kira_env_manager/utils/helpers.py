@@ -6,6 +6,11 @@ from enum import Enum
 
 from qfluentwidgets import isDarkTheme, StateToolTip
 
+import sys
+import subprocess
+from typing import Tuple, List
+
+CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
 
@@ -132,3 +137,36 @@ def state_color(state: InstanceState, dark=None):
         InstanceState.ERROR:    "#f44336" if not dark else "#e57373",
     }
     return mapping.get(state, "#9e9e9e")
+
+
+def stream_subprocess(
+    args: List[str],
+    cwd: str | None = None,
+    timeout: float | None = None,
+    merge_stderr: bool = True,
+) -> Tuple[int, List[str]]:
+    """Run subprocess, return (returncode, stdout_lines).
+
+    merge_stderr=True (default): stdout+stderr interleaved into one list.
+    merge_stderr=False: stderr goes to subprocess.PIPE (caller must handle).
+    Applies CREATE_NO_WINDOW on Windows, utf-8 with replace on decode errors.
+    """
+    stderr = subprocess.STDOUT if merge_stderr else subprocess.PIPE
+    proc = subprocess.Popen(
+        args, cwd=cwd, stdout=subprocess.PIPE, stderr=stderr,
+        text=True, encoding="utf-8", errors="replace",
+        creationflags=CREATE_NO_WINDOW,
+    )
+    lines: List[str] = []
+    try:
+        for line in proc.stdout:
+            lines.append(line.rstrip("\n"))
+        proc.wait(timeout=timeout)
+        return proc.returncode, lines
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            pass
+        proc.wait()
+        return -1, lines

@@ -169,8 +169,9 @@ class ProjectPage(QScrollArea):
         self.update_card.setEnabled(False)
 
         if self._worker and self._worker.isRunning():
-            self._worker.terminate()
-            self._worker.wait(2000)
+            self._worker.requestInterruption()
+            self._worker.quit()
+            self._worker.wait(3000)
 
         self._state_tooltip = StateToolTip(
             "正在更新", "git pull...", self.window(),

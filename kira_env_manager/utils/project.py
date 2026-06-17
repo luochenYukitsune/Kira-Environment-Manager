@@ -4,8 +4,9 @@ import os
 import re
 import shutil
 import subprocess
-import threading
 from pathlib import Path
+
+from kira_env_manager.utils.helpers import CREATE_NO_WINDOW, stream_subprocess
 
 
 KIRA_GITHUB_URL = "https://github.com/xxynet/KiraAI"
@@ -44,8 +45,6 @@ def clone_repo(url, target_path, output_callback=None, timeout=300):
     Returns:
         (success: bool, message: str)
     """
-    import time
-
     try:
         target = Path(target_path)
         if target.exists():
@@ -54,54 +53,25 @@ def clone_repo(url, target_path, output_callback=None, timeout=300):
         if output_callback:
             output_callback(f">>> git clone {url} {target_path}\n")
 
-        proc = subprocess.Popen(
+        returncode, lines = stream_subprocess(
             ["git", "clone", "--progress", "--depth", "1", url, str(target_path)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            creationflags=0x08000000,
+            timeout=timeout,
         )
-
-        # 读线程：在后台读取 stdout，通过 callback 实时输出
-        _stop_reader = [False]
-
-        def _reader():
-            for line in proc.stdout:
-                if _stop_reader[0]:
-                    break
-                if output_callback:
-                    output_callback(line)
-
-        reader = threading.Thread(target=_reader, daemon=True)
-        reader.start()
-
-        # 主线程直接 wait，确保 wait 返回后 returncode 一定可读
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            _stop_reader[0] = True
-            proc.kill()
-            proc.wait()
+        for line in lines:
+            if output_callback:
+                output_callback(line + "\n")
+        if returncode == -1:
             shutil.rmtree(target_path, ignore_errors=True)
             return False, f"克隆超时 ({timeout}秒)"
-        finally:
-            # 关闭管道，让读线程退出
-            if proc.stdout:
-                try:
-                    proc.stdout.close()
-                except OSError:
-                    pass
-            reader.join(timeout=3)
 
-        if proc.returncode == 0:
+        if returncode == 0:
             version = check_kira_version(str(target_path))
             msg = f"克隆成功"
             if version:
                 msg += f"，版本: {version}"
             return True, msg
         else:
-            return False, f"克隆失败 (退出码: {proc.returncode})"
+            return False, f"克隆失败 (退出码: {returncode})"
 
     except FileNotFoundError:
         return False, "未找到 git 命令，请先安装 Git (https://git-scm.com/)"
@@ -125,50 +95,20 @@ def update_project(project_path, output_callback=None, timeout=120):
         if output_callback:
             output_callback(f">>> cd {project_path} && git pull\n")
 
-        proc = subprocess.Popen(
-            ["git", "pull"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            cwd=str(project_path),
-            creationflags=0x08000000,
+        returncode, lines = stream_subprocess(
+            ["git", "pull"], cwd=str(project_path), timeout=timeout,
         )
-
-        # 读线程：后台读取 stdout，通过 callback 实时输出
-        _stop_reader = [False]
-
-        def _reader():
-            for line in proc.stdout:
-                if _stop_reader[0]:
-                    break
-                if output_callback:
-                    output_callback(line)
-
-        reader = threading.Thread(target=_reader, daemon=True)
-        reader.start()
-
-        # 主线程直接 wait，确保 returncode 可读
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            _stop_reader[0] = True
-            proc.kill()
-            proc.wait()
+        for line in lines:
+            if output_callback:
+                output_callback(line + "\n")
+        if returncode == -1:
             return False, f"更新超时 ({timeout}秒)"
-        finally:
-            if proc.stdout:
-                try:
-                    proc.stdout.close()
-                except OSError:
-                    pass
-            reader.join(timeout=3)
 
-        if proc.returncode == 0:
+        if returncode == 0:
             version = check_kira_version(str(project_path))
             return True, f"更新成功" + (f"，版本: {version}" if version else "")
         else:
-            return False, f"更新失败 (退出码: {proc.returncode})"
+            return False, f"更新失败 (退出码: {returncode})"
 
     except FileNotFoundError:
         return False, "未找到 git 命令"
@@ -181,7 +121,7 @@ def update_project(project_path, output_callback=None, timeout=120):
 def check_git_installed():
     """检测 Git 是否已安装并返回版本"""
     try:
-        result = subprocess.run(["git", "--version"], capture_output=True, text=True, timeout=10, creationflags=0x08000000)
+        result = subprocess.run(["git", "--version"], capture_output=True, text=True, timeout=10, creationflags=CREATE_NO_WINDOW)
         if result.returncode == 0:
             return result.stdout.strip()
         return None

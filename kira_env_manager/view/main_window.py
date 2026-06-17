@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QMessageBox
 
@@ -20,6 +20,8 @@ from kira_env_manager.common.config import get as cfg_get, set_config as cfg_set
 
 
 class MainWindow(FluentWindow):
+    closed_by_tray = pyqtSignal()
+
     def __init__(self):
         super().__init__()
 
@@ -43,6 +45,12 @@ class MainWindow(FluentWindow):
 
         # 创建系统托盘
         self._tray = TrayManager(self, self.launch_page, self)
+
+        from PyQt5.QtWidgets import QApplication
+        self.closed_by_tray.connect(
+            QApplication.instance().quit,
+            Qt.ConnectionType.UniqueConnection,
+        )
 
     def initNavigation(self):
         self.addSubInterface(
@@ -196,4 +204,5 @@ class MainWindow(FluentWindow):
         if hasattr(self, 'browser_page'):
             self.browser_page.cleanup()
 
+        self.closed_by_tray.emit()
         event.accept()
