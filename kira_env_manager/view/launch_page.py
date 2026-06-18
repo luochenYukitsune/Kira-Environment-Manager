@@ -2,10 +2,9 @@
 
 import os
 import json
+import shlex
 import shutil
 import stat
-import socket
-import signal
 import subprocess
 from pathlib import Path
 from PyQt5.QtCore import Qt, pyqtSignal, QThread, QTimer
@@ -332,7 +331,8 @@ class DownloadDialog(QDialog):
 
     def reject(self):
         if self._clone_worker and self._clone_worker.isRunning():
-            self._clone_worker.terminate()
+            self._clone_worker.requestInterruption()
+            self._clone_worker.quit()
             self._clone_worker.wait(3000)
         super().reject()
 
@@ -344,11 +344,39 @@ class DownloadDialog(QDialog):
             extra.append("--ignore-webui-version-check")
         custom = self.custom_args_input.text().strip()
         if custom:
-            extra.extend(custom.split())
+            try:
+                extra.extend(shlex.split(custom))
+            except ValueError:
+                from kira_env_manager.utils.logger import notify_error
+                notify_error("参数错误", "自定义启动参数存在语法错误（如未闭合的引号），请检查后重试", parent=self)
+                return None  # 返回 None 表示参数无效
         return (getattr(self, '_target_path', ''),
                 self.repo_input.text().strip() or KIRA_GITHUB_URL,
                 self._best_route_name,
                 extra)
+
+
+def _parse_requirements(req_path):
+    """Parse requirements.txt into a set of normalized package names.
+
+    Returns:
+        set of package names on success, None on failure to signal the caller
+        that the requirements file could not be read.
+    """
+    required = set()
+    try:
+        content = Path(req_path).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None  # 返回 None 表示读取失败，调用方应将其视为检查失败
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or line.startswith("-"):
+            continue
+        pkg = line.split("==")[0].split(">=")[0].split("~=")[0].split("<")[0].split("!=")[0].split(">")[0]
+        pkg = pkg.split("[")[0].split(";")[0].split("@")[0].strip()
+        if pkg:
+            required.add(pkg.lower().replace("_", "-"))
+    return required
 
 
 class _DepsCheckWorker(QThread):
@@ -387,15 +415,10 @@ class _DepsCheckWorker(QThread):
                         name = line.split("==")[0].strip().lower().replace("_", "-")
                         installed.add(name)
 
-                required = set()
-                for line in Path(req).read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if not line or line.startswith("#") or line.startswith("-"):
-                        continue
-                    pkg = line.split("==")[0].split(">=")[0].split("~=")[0].split("<")[0].split("!=")[0]
-                    pkg = pkg.split("[")[0].split(";")[0].strip().lower().replace("_", "-")
-                    if pkg:
-                        required.add(pkg)
+                required = _parse_requirements(req)
+                if required is None:
+                    self.finished.emit(False, ["无法读取 requirements.txt"], "依赖文件读取失败")
+                    return
 
                 missing = sorted(p for p in required if p not in installed)
                 ok = len(missing) == 0
@@ -546,20 +569,6 @@ class InstanceCard(CardWidget):
         """端口变更时刷新显示"""
         self.port_label.setText(f"端口: {new_port}")
 
-    def _check_port_status(self):
-        """通过撞端口检测实例是否在运行"""
-        port = self.inst.port
-        try:
-            with socket.create_connection(("127.0.0.1", port), timeout=0.1):
-                is_running = True
-        except (ConnectionRefusedError, TimeoutError, OSError):
-            is_running = False
-
-        # 状态变化时更新UI
-        if is_running != self._is_running:
-            self._is_running = is_running
-            self._update_running_ui(is_running)
-
     def _update_dot(self, running):
         self.status_dot.setStyleSheet(
             f"background: {status_color(running)}; border-radius: 5px;"
@@ -588,6 +597,8 @@ class LaunchPage(QScrollArea):
         self.setObjectName("launchPage")
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # 透明背景：与 QWidget 页面（如首页）保持一致
+        self.viewport().setStyleSheet("background: transparent;")
 
         self._im = InstanceManager(self)
         self._setup_worker = None
@@ -713,79 +724,30 @@ class LaunchPage(QScrollArea):
                 if hasattr(card, 'refresh_deps'):
                     card.refresh_deps()
 
-    def _get_pid_by_port(self, port):
-        """根据端口获取占用该端口的进程 PID（跨平台）"""
-        try:
-            if os.name == 'nt':
-                result = subprocess.run(
-                    ["netstat", "-ano"],
-                    capture_output=True, text=True, timeout=5,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-                for line in result.stdout.splitlines():
-                    if f":{port}" in line and "LISTENING" in line:
-                        parts = line.split()
-                        if parts:
-                            try:
-                                return int(parts[-1])
-                            except ValueError:
-                                pass
-            else:
-                # Linux/macOS: lsof -ti :PORT
-                result = subprocess.run(
-                    ["lsof", "-ti", f":{port}"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                if result.stdout.strip():
-                    return int(result.stdout.strip().split("\n")[0])
-        except Exception as e:
-            logger.error(f"获取端口 {port} 的 PID 失败: {e}")
-        return None
-
-    def _kill_process_by_pid(self, pid):
-        """根据 PID 杀死进程（跨平台）"""
-        try:
-            if os.name == 'nt':
-                subprocess.run(
-                    ["taskkill", "/F", "/PID", str(pid)],
-                    capture_output=True, timeout=5,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-            else:
-                os.kill(pid, signal.SIGKILL)
-            return True
-        except Exception as e:
-            logger.error(f"杀死进程 {pid} 失败: {e}")
-            return False
-
     def _check_orphan_processes(self):
-        """启动时检测残留进程（撞端口检测）"""
-        orphan_ports = []
+        """启动时检测残留进程（通过端口探测，避免依赖重建后丢失的 _worker 状态）"""
+        orphan_instances = []
         for inst in self._im.instances():
-            port = inst.cfg.get("port", 5267)
-            if check_port_open("127.0.0.1", port):
-                orphan_ports.append((inst.name, port))
+            if check_port_open("127.0.0.1", inst.port):
+                orphan_instances.append(inst)
 
-        if not orphan_ports:
+        if not orphan_instances:
             return
 
-        names = ", ".join(f"{name}(:{port})" for name, port in orphan_ports)
+        names = ", ".join(f"{inst.name}(:{inst.port})" for inst in orphan_instances)
         reply = QMessageBox.question(
             self, "检测到残留进程",
-            f"检测到以下端口被占用，可能是上次未正常关闭的进程:\n{names}\n\n是否强制停止这些进程？",
+            f"检测到以下实例可能仍在运行:\n{names}\n\n是否强制停止这些进程？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
         )
         if reply == QMessageBox.Yes:
-            for name, port in orphan_ports:
-                pid = self._get_pid_by_port(port)
-                if pid:
-                    if self._kill_process_by_pid(pid):
-                        logger.info(f"已停止残留进程: {name} (PID: {pid}, 端口: {port})")
-                    else:
-                        logger.error(f"停止残留进程失败: {name} (PID: {pid})")
-                else:
-                    logger.warning(f"未找到占用端口 {port} 的进程")
+            for inst in orphan_instances:
+                try:
+                    inst.stop()
+                    logger.info(f"已停止残留进程: {inst.name}")
+                except Exception as e:
+                    logger.error(f"停止残留进程失败: {inst.name} - {e}")
 
     def _create_default(self):
         pp = cfg_get("project_path") or ""
@@ -801,7 +763,10 @@ class LaunchPage(QScrollArea):
         if dlg.exec_() != QDialog.Accepted:
             return
 
-        target_path, repo_url, route_name, extra_args = dlg.get_result()
+        result = dlg.get_result()
+        if result is None:
+            return  # 参数解析失败，错误已在 get_result 中提示
+        target_path, repo_url, route_name, extra_args = result
         if not target_path or not os.path.exists(target_path):
             return
 
@@ -832,8 +797,9 @@ class LaunchPage(QScrollArea):
             on_done: 安装完成后的回调
         """
         if self._setup_worker and self._setup_worker.isRunning():
-            self._setup_worker.terminate()
-            self._setup_worker.wait(2000)
+            self._setup_worker.requestInterruption()
+            self._setup_worker.quit()
+            self._setup_worker.wait(3000)
 
         # 检查 requirements.txt
         req = os.path.join(project_path, "requirements.txt")
@@ -860,17 +826,22 @@ class LaunchPage(QScrollArea):
 
         # 创建 worker 并启动
         self._setup_worker = SetupWorker(venv_path, req, primary, fallback)
+        worker = self._setup_worker  # 局部引用用于 identity 验证
 
-        self._setup_worker.progress.connect(self._on_setup_progress)
-        self._setup_worker.finished.connect(
-            lambda ok, msg: self._on_setup_done(ok, msg, on_done, project_path, venv_path)
+        worker.progress.connect(self._on_setup_progress)
+        worker.finished.connect(
+            lambda ok, msg, w=worker: self._on_setup_done(ok, msg, w, on_done, project_path, venv_path)
         )
-        self._setup_worker.start()
+        worker.finished.connect(lambda w=worker: w.deleteLater())
+        worker.start()
 
     def _on_setup_progress(self, line):
         append_and_scroll(self.console, line)
 
-    def _on_setup_done(self, ok, msg, on_done=None, project_path=None, venv_path=None):
+    def _on_setup_done(self, ok, msg, worker=None, on_done=None, project_path=None, venv_path=None):
+        # 验证 sender 是当前 worker，防止旧 worker 信号覆盖状态
+        if worker is not None and worker is not self._setup_worker:
+            return
         if self._state_tip:
             self._state_tip.setContent(msg)
             self._state_tip.setState(True)
@@ -933,25 +904,19 @@ class LaunchPage(QScrollArea):
             while port in used_ports:
                 port += 1
 
-        # venv 探测 + 依赖检查
+        # venv 探测
         venv_path = ""
-        deps_ok = False
         # 1) 检查项目下是否有 venv
         project_venv = os.path.join(path, "venv")
         if is_venv(project_venv):
             venv_path = project_venv
-        # 2) 如有 venv，检查依赖
-        req_path = os.path.join(path, "requirements.txt")
-        if venv_path and os.path.exists(req_path):
-            ok_deps, _, _ = check_dependencies_installed(venv_path, req_path)
-            deps_ok = ok_deps
 
         self._im.add({
             "name": name.strip(), "port": port,
             "data_dir": data_dir,
             "project_path": path, "extra_args": [],
             "venv_path": venv_path,
-            "deps_ok": deps_ok,
+            "deps_ok": False,  # card's _DepsCheckWorker will update
         })
         self._save()
 
@@ -1152,29 +1117,36 @@ class LaunchPage(QScrollArea):
                     )
                 return
 
-            # 有 venv，检查依赖
+            # 有 venv，异步检查依赖
             cfg_set("project_path", project_path)
             cfg_set("venv_path", venv_path)
 
             req_file = os.path.join(project_path, "requirements.txt")
-            deps_ok, missing, _ = check_dependencies_installed(venv_path, req_file)
-            if not deps_ok:
-                reply = QMessageBox.question(
-                    self, "依赖未安装",
-                    f"缺失 {len(missing)} 个依赖包。\n\n是否立即安装？",
-                    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
-                )
-                if reply == QMessageBox.Yes:
-                    self._install_deps_for_path(
-                        project_path, venv_path=venv_path,
-                        on_done=lambda: self._do_start(instance, project_path, venv_path),
-                    )
-                return
-
-            self._do_start(instance, project_path, venv_path)
+            worker = _DepsCheckWorker(venv_path, project_path, self)
+            worker.finished.connect(
+                lambda ok, missing, msg, inst=instance, pp=project_path, vp=venv_path:
+                    self._on_deps_for_start(ok, missing, msg, inst, pp, vp)
+            )
+            worker.start()
+            return
         except Exception as e:
             logger.exception(f"启动失败: {instance.name if instance else 'unknown'}")
             notify_error("启动失败", str(e), parent=self)
+
+    def _on_deps_for_start(self, ok, missing, msg, instance, project_path, venv_path):
+        if ok:
+            self._do_start(instance, project_path, venv_path)
+        else:
+            reply = QMessageBox.question(
+                self, "依赖未安装",
+                f"缺失 {len(missing)} 个依赖包。\n\n是否立即安装？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Yes:
+                self._install_deps_for_path(
+                    project_path, venv_path=venv_path,
+                    on_done=lambda: self._do_start(instance, project_path, venv_path),
+                )
 
     def _do_start(self, instance, project_path, venv_path):
         """实际启动实例（由 _on_start 或依赖安装完成后调用）"""

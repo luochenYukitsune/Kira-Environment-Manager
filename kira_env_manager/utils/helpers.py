@@ -6,6 +6,12 @@ from enum import Enum
 
 from qfluentwidgets import isDarkTheme, StateToolTip
 
+import sys
+import threading
+import subprocess
+from typing import Callable, Tuple, List, Optional
+
+CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
 
@@ -132,3 +138,52 @@ def state_color(state: InstanceState, dark=None):
         InstanceState.ERROR:    "#f44336" if not dark else "#e57373",
     }
     return mapping.get(state, "#9e9e9e")
+
+
+def stream_subprocess(
+    args: List[str],
+    cwd: str | None = None,
+    timeout: float | None = None,
+    merge_stderr: bool = True,
+    line_callback: Optional[Callable[[str], None]] = None,
+) -> Tuple[int, List[str]]:
+    """Run subprocess, return (returncode, stdout_lines).
+
+    merge_stderr=True (default): stdout+stderr interleaved into one list.
+    merge_stderr=False: stderr consumed by daemon thread to prevent deadlock.
+    line_callback: if provided, called synchronously for each line as it is
+                   read, enabling real-time UI updates.
+    Applies CREATE_NO_WINDOW on Windows, utf-8 with replace on decode errors.
+    """
+    stderr = subprocess.STDOUT if merge_stderr else subprocess.PIPE
+    proc = subprocess.Popen(
+        args, cwd=cwd, stdout=subprocess.PIPE, stderr=stderr,
+        text=True, encoding="utf-8", errors="replace",
+        creationflags=CREATE_NO_WINDOW,
+    )
+    # 当 merge_stderr=False 时，用守护线程消费 stderr 防止管道堵塞死锁
+    if not merge_stderr and proc.stderr:
+        def _drain_stderr():
+            try:
+                for _ in proc.stderr:
+                    pass
+            except (OSError, ValueError):
+                pass
+        threading.Thread(target=_drain_stderr, daemon=True).start()
+
+    lines: List[str] = []
+    try:
+        for line in proc.stdout:
+            stripped = line.rstrip("\n")
+            lines.append(stripped)
+            if line_callback:
+                line_callback(stripped)
+        proc.wait(timeout=timeout)
+        return proc.returncode, lines
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            pass
+        proc.wait()
+        return -1, lines

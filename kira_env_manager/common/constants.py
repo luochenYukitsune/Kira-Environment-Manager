@@ -23,7 +23,7 @@ def get_app_data_dir():
         return Path(__file__).parent.parent
 
 
-# KiraAI 默认端口
+# 默认端口
 DEFAULT_PORT = 5267
 
 # 主窗口尺寸
@@ -55,5 +55,10 @@ GRACEFUL_STOP_TIMEOUT = 3
 # 线程等待超时 (ms)
 THREAD_WAIT_TIMEOUT = 5000
 
-# 最大实例数
-MAX_INSTANCES = 8
+# 背景音乐文件路径（设为 None，由 media_player._resolve_path() 在运行时解析）
+MUSIC_FILE_PATH = None
+
+# 音乐默认音量 (0-100)
+MUSIC_DEFAULT_VOLUME = 15
+
+
