@@ -3,6 +3,8 @@
 import urllib.request
 import time
 
+from kira_env_manager.utils.network import _test_url_speed
+
 
 # 常用 pip 镜像源（名称, URL, 描述）
 MIRRORS = [
@@ -45,8 +47,9 @@ def test_single_mirror(url, timeout=5):
         start = time.time()
         req = urllib.request.Request(url, method="HEAD")
         req.add_header("User-Agent", "Kira-Manager/1.0")
-        with urllib.request.urlopen(req, timeout=timeout):
-            pass
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if not (200 <= resp.status < 400):
+                return None  # unreachable — skip this mirror
         elapsed = (time.time() - start) * 1000
         return round(elapsed, 1)
     except Exception:
@@ -64,26 +67,16 @@ def test_all_mirrors(callback=None):
     """
     results = []
     for name, url, desc in MIRRORS:
-        latency = test_single_mirror(url)
-        results.append((name, url, latency))
+        rtt, err = _test_url_speed(url, timeout=5.0)
+        if err:
+            results.append((name, url, None))
+            if callback:
+                callback(name, url, None)
+            continue
+        results.append((name, url, rtt))
         if callback:
-            callback(name, url, latency)
+            callback(name, url, rtt)
 
     # 按延迟排序（None 排最后）
     results.sort(key=lambda x: x[2] if x[2] is not None else float("inf"))
     return results
-
-
-def find_fastest_mirror(timeout=5):
-    """找到最快的可用镜像源
-
-    Returns:
-        (index, name, url, latency_ms) 或 (0, MIRRORS[0]...) 全不可达时
-    """
-    results = test_all_mirrors()
-    if results and results[0][2] is not None:
-        for i, (name, url, _) in enumerate(MIRRORS):
-            if name == results[0][0] and url == results[0][1]:
-                return (i, results[0][0], results[0][1], results[0][2])
-        return (0, results[0][0], results[0][1], results[0][2])
-    return (0, "PyPI 官方", "https://pypi.org/simple/", None)

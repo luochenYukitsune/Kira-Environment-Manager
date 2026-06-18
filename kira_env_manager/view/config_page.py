@@ -5,7 +5,7 @@ import os
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
-    QInputDialog, QDialog,
+    QInputDialog, QDialog, QMessageBox,
 )
 
 from qfluentwidgets import (
@@ -136,6 +136,12 @@ class ConfigDialog(QDialog):
         cur = int(self._webui_config.get(key, lo))
         val, ok = QInputDialog.getInt(self, "编辑 webui.json", f"{key} ({lo}-{hi}):", cur, lo, hi)
         if ok:
+            # 端口修改时先检查实例是否在运行，避免先保存再拒绝
+            if key == "port" and self.instance:
+                if self.instance.is_running():
+                    QMessageBox.warning(self, "无法修改", "实例正在运行中，请先停止再修改端口")
+                    logger.warning("Blocked port change for running instance: %s (port %d)", self.instance.name, self.instance.port)
+                    return
             self._webui_config[key] = val
             self._save_webui()
             if key in self._cards:

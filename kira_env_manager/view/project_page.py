@@ -34,7 +34,9 @@ class PullWorker(QThread):
         self.project_path = project_path
 
     def run(self):
-        cb = lambda line: self.line_output.emit(line)
+        cb = lambda line: self.line_output.emit(line) if not self.isInterruptionRequested() else None
+        if self.isInterruptionRequested():
+            return
         ok, msg = update_project(self.project_path, output_callback=cb)
         self.finished.emit(ok, msg)
 
@@ -45,6 +47,8 @@ class ProjectPage(QScrollArea):
         self.setObjectName("projectPage")
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # 透明背景：与 QWidget 页面（如首页）保持一致
+        self.viewport().setStyleSheet("background: transparent;")
 
         self._worker = None
         self._state_tooltip = None
@@ -169,8 +173,12 @@ class ProjectPage(QScrollArea):
         self.update_card.setEnabled(False)
 
         if self._worker and self._worker.isRunning():
-            self._worker.terminate()
-            self._worker.wait(2000)
+            self._worker.requestInterruption()
+            self._worker.quit()
+            self._worker.wait(3000)
+            if self._worker.isRunning():
+                notify_warning("更新进行中", "上一次更新操作仍在执行，请稍后再试", parent=self)
+                return
 
         self._state_tooltip = StateToolTip(
             "正在更新", "git pull...", self.window(),

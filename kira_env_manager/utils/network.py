@@ -3,6 +3,8 @@
 import time
 import urllib.request
 
+import requests
+
 # GitHub 访问方案：[名称, 克隆前缀, 测试URL, 描述]
 GITHUB_ROUTES = [
     ("直连", "https://github.com", "https://github.com/xxynet/KiraAI.git", "默认直连"),
@@ -12,6 +14,20 @@ GITHUB_ROUTES = [
     ("kkgithub", "https://kkgithub.com", "https://kkgithub.com/xxynet/KiraAI.git", "kk 镜像 (国内快)"),
     ("cnb.cool", "https://cnb.cool", "https://cnb.cool/github.com/xxynet/KiraAI.git", "CNB 国内镜像"),
 ]
+
+
+def _test_url_speed(url, timeout=5.0):
+    """Test URL latency via HEAD request. Returns (rtt_ms, None) or (None, error_str)."""
+    try:
+        start = time.time()
+        response = requests.head(url, timeout=timeout, allow_redirects=True,
+                                 headers={"User-Agent": "KiraEnvManager/1.0"})
+        if not (200 <= response.status_code < 400):
+            return None, f"HTTP {response.status_code}"
+        rtt = (time.time() - start) * 1000
+        return round(rtt, 1), None
+    except Exception as e:
+        return None, str(e)
 
 
 def _normalize_repo(repo_input):
@@ -55,8 +71,9 @@ def test_route(route, timeout=5):
     try:
         start = time.time()
         req = urllib.request.Request(test_url, method="HEAD", headers=headers)
-        with urllib.request.urlopen(req, timeout=timeout):
-            pass
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if not (200 <= resp.status < 400):
+                return None  # unreachable — skip this route
         return round((time.time() - start) * 1000, 1)
     except Exception:
         try:

@@ -47,12 +47,12 @@ class InstanceCard(CardWidget):
         layout.addWidget(self.open_btn)
 
         # 初始状态（使用 PM 内存状态，避免 UI 线程同步端口探测）
-        self._update_status(self.instance._pm.is_running())
+        self._update_status(self.instance._pm.is_running(), force=True)
         # 绑定 state_changed 信号驱动状态更新
         self.instance.state_changed.connect(self._update_status)
 
-    def _update_status(self, running):
-        if running == self._is_running:
+    def _update_status(self, running, force=False):
+        if not force and running == self._is_running:
             return
         self._is_running = running
         if running:

@@ -3,8 +3,9 @@
 import os
 import sys
 import subprocess
-import threading
 from pathlib import Path
+
+from kira_env_manager.utils.helpers import CREATE_NO_WINDOW, stream_subprocess
 
 
 def find_system_python():
@@ -16,7 +17,7 @@ def find_system_python():
             result = subprocess.run(
                 ["py", "-3", "-c", "import sys; print(sys.executable)"],
                 capture_output=True, text=True, timeout=10,
-                creationflags=0x08000000,
+                creationflags=CREATE_NO_WINDOW,
             )
             if result.returncode == 0:
                 path = result.stdout.strip()
@@ -25,7 +26,7 @@ def find_system_python():
             result = subprocess.run(
                 ["where", "python"],
                 capture_output=True, text=True, timeout=10,
-                creationflags=0x08000000,
+                creationflags=CREATE_NO_WINDOW,
             )
             if result.returncode == 0:
                 candidates = [l.strip() for l in result.stdout.splitlines() if l.strip()]
@@ -54,7 +55,7 @@ def detect_python():
             result = subprocess.run(
                 [path, "--version"],
                 capture_output=True, text=True, timeout=10,
-                creationflags=0x08000000,
+                creationflags=CREATE_NO_WINDOW,
             )
             if result.returncode == 0:
                 version = result.stdout.strip().replace("Python ", "")
@@ -113,7 +114,7 @@ def create_venv(venv_path, python_exe=None):
         venv_result = subprocess.run(
             [python_exe, "-m", "venv", str(venv_path)],
             capture_output=True, text=True, timeout=120,
-            creationflags=0x08000000,
+            creationflags=CREATE_NO_WINDOW,
         )
         if venv_result.returncode != 0:
             err = venv_result.stderr.strip() or venv_result.stdout.strip() or "未知错误"
@@ -122,7 +123,7 @@ def create_venv(venv_path, python_exe=None):
         subprocess.run(
             pip_cmd + ["install", "--upgrade", "pip"],
             capture_output=True, text=True, timeout=120,
-            creationflags=0x08000000,
+            creationflags=CREATE_NO_WINDOW,
         )
         return True, f"虚拟环境创建成功: {venv_path}"
     except subprocess.TimeoutExpired:
@@ -144,7 +145,16 @@ def check_dependencies_installed(venv_path, requirements_path):
     if not req_file.exists():
         return False, [], f"找不到 requirements.txt: {requirements_path}"
     required = set()
-    for line in req_file.read_text(encoding="utf-8").splitlines():
+    try:
+        content = req_file.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return False, [], f"无法读取 requirements.txt: {requirements_path}"
+    if "\ufffd" in content:
+        import logging
+        logging.getLogger(__name__).warning(
+            "requirements.txt contains invalid UTF-8 bytes at %s", requirements_path
+        )
+    for line in content.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or line.startswith("-"):
             continue
@@ -157,7 +167,7 @@ def check_dependencies_installed(venv_path, requirements_path):
             pip_cmd + ["list", "--format=freeze"],
             capture_output=True, text=True, timeout=15,
             encoding='utf-8', errors='replace',
-            creationflags=0x08000000,
+            creationflags=CREATE_NO_WINDOW,
         )
         installed = set()
         for line in result.stdout.splitlines():
@@ -204,37 +214,17 @@ def install_requirements(venv_path, requirements_path,
             cmd = pip_cmd + ["install", "-r", str(requirements_path)]
             if m:
                 cmd += ["-i", m]
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    text=True, bufsize=1,
-                                    creationflags=0x08000000)
-            _stop_reader = [False]
-            def _reader(process=proc):
-                for line in process.stdout:
-                    if _stop_reader[0]:
-                        break
-                    if output_callback:
-                        output_callback(line)
-            reader = threading.Thread(target=_reader, daemon=True)
-            reader.start()
-            try:
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                _stop_reader[0] = True
-                proc.kill()
-                proc.wait()
+            returncode, lines = stream_subprocess(
+                cmd, timeout=timeout,
+                line_callback=lambda line: output_callback(line + "\n") if output_callback else None,
+            )
+            if returncode == 0:
+                src_name = m.split("/")[2] if m else "PyPI"
+                return True, f"依赖安装成功 ({src_name})"
+            elif returncode == -1:
                 if output_callback:
                     output_callback(f"\n>>> {m.split('/')[2] if m else 'PyPI'} 安装超时 ({timeout}秒)\n")
                 continue
-            finally:
-                if proc.stdout:
-                    try:
-                        proc.stdout.close()
-                    except OSError:
-                        pass
-                reader.join(timeout=3)
-            if proc.returncode == 0:
-                src_name = m.split("/")[2] if m else "PyPI"
-                return True, f"依赖安装成功 ({src_name})"
         return False, "所有源均安装失败"
     except FileNotFoundError:
         return False, f"找不到 python: {pip_cmd[0] if pip_cmd else '未知'}"

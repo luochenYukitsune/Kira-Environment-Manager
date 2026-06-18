@@ -123,10 +123,8 @@ class TrayManager(QSystemTrayIcon):
         )
 
     def _quit_app(self):
-        """完全退出"""
+        """完全退出 — closeEvent handles confirm dialog and emits closed_by_tray if accepted"""
         self._main_window.close()
-        from PyQt5.QtWidgets import QApplication
-        QApplication.instance().quit()
 
     def show_minimize_notification(self):
         """显示最小化到托盘的通知"""

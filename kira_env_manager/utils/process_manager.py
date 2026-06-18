@@ -3,7 +3,7 @@
 import subprocess
 import os
 import threading
-from PyQt5.QtCore import QObject, QThread, pyqtSignal
+from PyQt5.QtCore import QObject, QThread, pyqtSignal, QMutex, QMutexLocker
 
 
 class _ProcessWorker(QThread):
@@ -110,10 +110,14 @@ class ProcessManager(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._worker = None
-        self._running = False
+        self._restarting = False
+        self._restarting_mutex = QMutex()
 
     def is_running(self):
-        return self._running
+        """Single source of truth: worker is alive and not being stopped."""
+        if not self._worker:
+            return False
+        return self._worker.isRunning()
 
     def start(self, cmd, cwd=None, env=None):
         """启动进程
@@ -123,18 +127,26 @@ class ProcessManager(QObject):
             cwd: 工作目录
             env: 额外环境变量 dict
         """
-        if self._running:
+        if self.is_running():
             self.output_received.emit("[WARN] 进程已在运行中\n")
             return False
 
         if self._worker:
             if self._worker.isRunning():
-                # 停止旧 worker，用 finished 信号异步接力启动新 worker
-                self._worker.stop()
+                # Stop old worker, schedule restart
+                # 先连接信号再调用 stop()，避免进程在信号连接前就结束导致回调丢失
                 old_worker = self._worker
                 self._worker = None
 
+                locker = QMutexLocker(self._restarting_mutex)
+                self._restarting = True
+
                 def _start_new():
+                    locker2 = QMutexLocker(self._restarting_mutex)
+                    if not self._restarting:
+                        return  # cancelled by stop() during transition
+                    self._restarting = False
+                    del locker2
                     if old_worker.isRunning():
                         old_worker.wait(500)
                     old_worker.deleteLater()
@@ -142,10 +154,10 @@ class ProcessManager(QObject):
                     self._worker.output_line.connect(self._on_output)
                     self._worker.process_finished.connect(self._on_finished)
                     self._worker.start()
-                    self._running = True
                     self.state_changed.emit(True)
 
                 old_worker.process_finished.connect(_start_new)
+                old_worker.stop()
                 return True
 
             self._worker.deleteLater()
@@ -156,7 +168,6 @@ class ProcessManager(QObject):
         self._worker.process_finished.connect(self._on_finished)
         self._worker.start()
 
-        self._running = True
         self.state_changed.emit(True)
         return True
 
@@ -164,15 +175,19 @@ class ProcessManager(QObject):
         """停止进程 — 强制终止，不阻塞主线程
 
         taskkill /F 通常瞬间完成；进程结束后由 process_finished 信号
-        异步处理 _running 状态和清理，无需在 UI 线程中 wait()。
+        异步处理状态和清理，无需在 UI 线程中 wait()。
         """
+        locker = QMutexLocker(self._restarting_mutex)
+        if self._restarting:
+            self._restarting = False
+            return  # cancel pending restart; old process already being stopped
+
         if not self._worker:
             return
 
-        was_running = self._running
+        was_running = self.is_running()
         self.output_received.emit("\n>>> 正在停止进程...\n")
         self._worker.stop()
-        self._running = False
         # 仅在状态真正变化时才通知外部，避免无意义的卡片重建
         if was_running:
             self.state_changed.emit(False)
@@ -186,6 +201,5 @@ class ProcessManager(QObject):
         self.output_received.emit(line)
 
     def _on_finished(self, exit_code):
-        self._running = False
         self.state_changed.emit(False)
         self.finished.emit(exit_code)

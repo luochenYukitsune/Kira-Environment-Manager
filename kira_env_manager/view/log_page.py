@@ -73,6 +73,7 @@ class LogPage(QWidget):
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._auto_refresh)
         self._last_size = 0
+        self._startup_offset = get_startup_offset()
 
         # 初始化
         self._update_path()
@@ -114,12 +115,12 @@ class LogPage(QWidget):
             return ""
 
         try:
-            startup_offset = get_startup_offset()
-
             with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-                if startup_offset > 0:
+                if self._startup_offset > 0:
                     try:
-                        f.seek(startup_offset)
+                        f.seek(self._startup_offset)
+                        if f.tell() > os.path.getsize(log_path):
+                            f.seek(0)
                     except OSError:
                         f.seek(0)
 
@@ -168,6 +169,7 @@ class LogPage(QWidget):
                 f.write("")
             self.log_browser.clear()
             self._last_size = 0
+            self._startup_offset = 0
             notify_success("已清空", "日志文件已清空", parent=self)
         except Exception as e:
             notify_error("失败", f"清空日志失败: {e}", parent=self)

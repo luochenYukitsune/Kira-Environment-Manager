@@ -7,6 +7,7 @@
 import copy
 import json
 import os
+import tempfile
 import threading
 from pathlib import Path
 
@@ -25,6 +26,7 @@ DEFAULT_CONFIG = {
     "font_path": "",  # 自定义字体路径，空=使用内置默认字体
     "instances": [],  # [{name, port, data_dir, project_path, extra_args}]
     "tray_close_action": "ask",  # "ask"=每次询问 | "minimize"=缩托盘 | "exit"=直接退出
+    "music_path": "",  # 自定义背景音乐路径，空=使用内嵌默认音乐
 }
 
 CONFIG_FILE = get_app_data_dir() / "manager_config.json"
@@ -81,18 +83,21 @@ def load_config():
 
 def _write_atomic(cfg):
     """仅执行原子写入（不涉及缓存更新，调用方负责在适当的锁范围内使用）"""
-    tmp = CONFIG_FILE.with_suffix(".tmp")
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-        os.replace(str(tmp), str(CONFIG_FILE))
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            dir=os.path.dirname(CONFIG_FILE),
+            suffix=".tmp",
+            delete=False,
+            encoding="utf-8",
+        ) as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+            tmp_path = f.name
+        os.replace(tmp_path, str(CONFIG_FILE))
         return True
     except Exception as e:
-        try:
-            if tmp.exists():
-                tmp.unlink()
-        except OSError:
-            pass
         try:
             from kira_env_manager.utils.logger import logger
             logger.warning(f"写入配置文件失败 ({CONFIG_FILE}): {e}")

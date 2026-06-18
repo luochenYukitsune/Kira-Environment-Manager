@@ -15,8 +15,6 @@ from PyQt5.QtCore import Qt, QT_VERSION
 from PyQt5.QtGui import QFontDatabase, QFont, QSurfaceFormat
 from PyQt5.QtWidgets import QApplication, QMessageBox
 
-from qfluentwidgets import setTheme, Theme
-
 from kira_env_manager.utils.logger import setup_logging, logger, get_log_path
 from kira_env_manager.view.main_window import MainWindow
 
@@ -109,13 +107,14 @@ def main():
 
     app = QApplication(sys.argv)
 
+    # Fusion 渲染引擎 —— 使原生弹窗跟随调色板主题
+    app.setStyle("Fusion")
+
     # 统一日志池 —— 捕获所有异常、Qt 消息、stdout/stderr
     setup_logging()
 
     # 注册自定义字体并设为全局默认
     _init_global_font(app)
-
-    setTheme(Theme.AUTO)
 
     try:
         window = MainWindow()
