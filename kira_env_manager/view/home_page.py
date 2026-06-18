@@ -19,14 +19,14 @@ from kira_env_manager.common.constants import PAGE_MARGINS
 
 class _StatusCheckWorker(QThread):
     """后台线程：检测 Python / Git 状态，避免 UI 卡顿"""
-    finished = pyqtSignal(str, str, str)  # python_version, python_path, git_version
+    status_ready = pyqtSignal(str, str, str)  # python_version, python_path, git_version
 
     def run(self):
         from kira_env_manager.utils.python_env import detect_python
         from kira_env_manager.utils.project import check_git_installed
         py_ver, py_path = detect_python()
         git_ver = check_git_installed() or "未安装"
-        self.finished.emit(py_ver, py_path, git_ver)
+        self.status_ready.emit(py_ver, py_path, git_ver)
 
 
 class StatusCard(CardWidget):
@@ -67,6 +67,8 @@ class HomePage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("homePage")
+
+        self._status_worker = None
 
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(*PAGE_MARGINS)
@@ -125,6 +127,16 @@ class HomePage(QWidget):
 
         self.refresh_status()
 
+    def _start_status_worker(self):
+        """集中化管理状态检测 worker，避免重复创建"""
+        if self._status_worker and self._status_worker.isRunning():
+            return  # worker 正在运行，跳过
+        self._status_worker = _StatusCheckWorker(self)
+        worker = self._status_worker  # 局部引用，避免 lambda 捕获的 self._status_worker 被覆盖
+        worker.status_ready.connect(self._on_status_ready, Qt.QueuedConnection)
+        worker.finished.connect(lambda w=worker: w.deleteLater())
+        worker.start()
+
     def showEvent(self, event):
         super().showEvent(event)
         QTimer.singleShot(0, self._async_refresh_status)
@@ -135,9 +147,7 @@ class HomePage(QWidget):
         self._refresh_nonblocking_status()
 
         # 异步部分：需要调用子进程的检测
-        worker = _StatusCheckWorker(self)
-        worker.finished.connect(self._on_status_ready, Qt.QueuedConnection)
-        worker.start()
+        self._start_status_worker()
 
     def _on_status_ready(self, py_ver, py_path, git_ver):
         """后台检测完成回调"""
@@ -187,6 +197,4 @@ class HomePage(QWidget):
     def refresh_status(self):
         """公开接口：同步刷新非阻塞部分 + 异步刷新子进程部分"""
         self._refresh_nonblocking_status()
-        worker = _StatusCheckWorker(self)
-        worker.finished.connect(self._on_status_ready, Qt.QueuedConnection)
-        worker.start()
+        self._start_status_worker()

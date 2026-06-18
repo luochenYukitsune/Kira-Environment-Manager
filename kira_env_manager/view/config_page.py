@@ -136,16 +136,18 @@ class ConfigDialog(QDialog):
         cur = int(self._webui_config.get(key, lo))
         val, ok = QInputDialog.getInt(self, "编辑 webui.json", f"{key} ({lo}-{hi}):", cur, lo, hi)
         if ok:
+            # 端口修改时先检查实例是否在运行，避免先保存再拒绝
+            if key == "port" and self.instance:
+                if self.instance.is_running():
+                    QMessageBox.warning(self, "无法修改", "实例正在运行中，请先停止再修改端口")
+                    logger.warning("Blocked port change for running instance: %s (port %d)", self.instance.name, self.instance.port)
+                    return
             self._webui_config[key] = val
             self._save_webui()
             if key in self._cards:
                 self._cards[key].setContent(str(val))
             # 同步更新 instance.cfg 中的端口，使 InstanceCard 显示更新
             if key == "port" and self.instance:
-                if self.instance.is_running():
-                    QMessageBox.warning(self, "无法修改", "实例正在运行中，请先停止再修改端口")
-                    logger.warning("Blocked port change for running instance: %s (port %d)", self.instance.name, self.instance.port)
-                    return
                 self.instance.cfg["port"] = val
                 # 新增: 通知卡片刷新端口显示和状态检测
                 self.instance.port_changed.emit(val)

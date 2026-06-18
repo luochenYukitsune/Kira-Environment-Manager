@@ -19,20 +19,25 @@ class MusicPlayer(QObject):
 
         # 加载音乐文件：优先用户配置，其次内置默认
         self._current_path = self._resolve_path()
-        url = QUrl.fromLocalFile(str(self._current_path))
-        self._player.setMedia(QMediaContent(url))
-        self._player.play()
+        if self._current_path and Path(str(self._current_path)).exists():
+            url = QUrl.fromLocalFile(str(self._current_path))
+            self._player.setMedia(QMediaContent(url))
+            self._player.play()
 
     @staticmethod
     def _resolve_path():
-        """按优先级解析音乐文件路径"""
+        """按优先级解析音乐文件路径，无有效文件时返回 None"""
         from kira_env_manager.common.config import get as cfg_get
         custom = cfg_get("music_path")
         if custom:
             p = Path(custom) if isinstance(custom, str) else custom
             if p.exists():
                 return p
-        return Path(MUSIC_FILE_PATH)
+        if MUSIC_FILE_PATH:
+            fallback = Path(MUSIC_FILE_PATH)
+            if fallback.exists():
+                return fallback
+        return None
 
     def load_file(self, path):
         """切换到指定音乐文件并开始播放"""

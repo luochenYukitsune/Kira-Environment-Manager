@@ -38,6 +38,8 @@ class VenvWorker(QThread):
         self.venv_path = venv_path
 
     def run(self):
+        if self.isInterruptionRequested():
+            return
         ok, msg = create_venv(self.venv_path)
         self.finished.emit(ok, msg)
 
@@ -52,8 +54,10 @@ class MirrorTestWorker(QThread):
         results = test_all_mirrors(
             callback=lambda n, u, l: self.progress.emit(
                 f"  {n}: {'%.0f ms' % l if l else '超时'}\n"
-            )
+            ) if not self.isInterruptionRequested() else None
         )
+        if self.isInterruptionRequested():
+            return
         if results and results[0][2] is not None:
             best_name, best_url, best_latency = results[0]
             best_idx = next(
@@ -81,12 +85,14 @@ class InstallWorker(QThread):
         self.fallback_mirrors = fallback_mirrors
 
     def run(self):
+        if self.isInterruptionRequested():
+            return
         ok, msg = install_requirements(
             self.venv_path,
             self.req_path,
             mirror_url=self.mirror_url,
             fallback_mirrors=self.fallback_mirrors,
-            output_callback=lambda line: self.line_output.emit(line),
+            output_callback=lambda line: self.line_output.emit(line) if not self.isInterruptionRequested() else None,
         )
         self.finished.emit(ok, msg)
 
@@ -100,6 +106,8 @@ class DepCheckWorker(QThread):
         self.req_path = req_path
 
     def run(self):
+        if self.isInterruptionRequested():
+            return
         all_ok, missing, _ = check_dependencies_installed(self.venv_path, self.req_path)
         self.finished.emit(all_ok, missing)
 
@@ -268,10 +276,15 @@ class EnvPage(QScrollArea):
             self._dep_worker.wait(3000)
 
         self._dep_worker = DepCheckWorker(venv_path, req_path)
-        self._dep_worker.finished.connect(self._on_dep_check_done)
-        self._dep_worker.start()
+        worker = self._dep_worker
+        worker.finished.connect(lambda all_ok, missing, w=worker: self._on_dep_check_done(all_ok, missing, w))
+        worker.finished.connect(lambda w=worker: w.deleteLater())
+        worker.start()
 
-    def _on_dep_check_done(self, all_ok, missing):
+    def _on_dep_check_done(self, all_ok, missing, worker=None):
+        if worker is not self._dep_worker:
+            return  # 旧 worker 的信号，忽略
+        self._dep_worker = None
         if all_ok:
             self._dep_status_label.setText("✅ 依赖全部已安装")
             self._dep_status_label.setStyleSheet("color: #4caf50;")
@@ -372,16 +385,18 @@ class EnvPage(QScrollArea):
         self._tooltip.move(self._tooltip.getSuitablePos())
         self._tooltip.show()
         self._speedtest_worker = MirrorTestWorker()
-        self._speedtest_worker.progress.connect(self._on_speed_progress)
-        self._speedtest_worker.finished.connect(self._on_speed_done)
-        self._speedtest_worker.start()
+        worker = self._speedtest_worker
+        worker.progress.connect(self._on_speed_progress)
+        worker.finished.connect(lambda best_idx, best_name, best_url, w=worker: self._on_speed_done(best_idx, best_name, best_url, w))
+        worker.finished.connect(lambda w=worker: w.deleteLater())
+        worker.start()
 
     def _on_speed_progress(self, line):
         append_and_scroll(self.console, line)
 
-    def _on_speed_done(self, best_idx, best_name, best_url):
-        if self._speedtest_worker is None:
-            return  # abandoned
+    def _on_speed_done(self, best_idx, best_name, best_url, worker=None):
+        if worker is not self._speedtest_worker:
+            return  # 旧 worker 的信号，忽略
         self._speedtest_worker = None
         self.speedtest_card.setEnabled(True)
         if self._tooltip:
@@ -419,12 +434,14 @@ class EnvPage(QScrollArea):
         self._tooltip.move(self._tooltip.getSuitablePos())
         self._tooltip.show()
         self._venv_worker = VenvWorker(venv_path)
-        self._venv_worker.finished.connect(self._on_venv_created)
-        self._venv_worker.start()
+        worker = self._venv_worker
+        worker.finished.connect(lambda ok, msg, w=worker: self._on_venv_created(ok, msg, w))
+        worker.finished.connect(lambda w=worker: w.deleteLater())
+        worker.start()
 
-    def _on_venv_created(self, ok, msg):
-        if self._venv_worker is None:
-            return  # abandoned
+    def _on_venv_created(self, ok, msg, worker=None):
+        if worker is not self._venv_worker:
+            return  # 旧 worker 的信号，忽略
         self._venv_worker = None
         self.venv_card.setEnabled(True)
         if self._tooltip:
@@ -526,16 +543,18 @@ class EnvPage(QScrollArea):
         self._tooltip.move(self._tooltip.getSuitablePos())
         self._tooltip.show()
         self._install_worker = InstallWorker(venv_path, req_path, primary, fallback)
-        self._install_worker.line_output.connect(self._on_line)
-        self._install_worker.finished.connect(self._on_install_done)
-        self._install_worker.start()
+        worker = self._install_worker
+        worker.line_output.connect(self._on_line)
+        worker.finished.connect(lambda ok, msg, w=worker: self._on_install_done(ok, msg, w))
+        worker.finished.connect(lambda w=worker: w.deleteLater())
+        worker.start()
 
     def _on_line(self, line):
         append_and_scroll(self.console, line)
 
-    def _on_install_done(self, ok, msg):
-        if self._install_worker is None:
-            return  # abandoned
+    def _on_install_done(self, ok, msg, worker=None):
+        if worker is not self._install_worker:
+            return  # 旧 worker 的信号，忽略
         self._install_worker = None
         self.install_card.setEnabled(True)
         if self._tooltip:

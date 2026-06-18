@@ -56,10 +56,8 @@ def clone_repo(url, target_path, output_callback=None, timeout=300):
         returncode, lines = stream_subprocess(
             ["git", "clone", "--progress", "--depth", "1", url, str(target_path)],
             timeout=timeout,
+            line_callback=lambda line: output_callback(line + "\n") if output_callback else None,
         )
-        for line in lines:
-            if output_callback:
-                output_callback(line + "\n")
         if returncode == -1:
             shutil.rmtree(target_path, ignore_errors=True)
             return False, f"克隆超时 ({timeout}秒)"
@@ -97,10 +95,8 @@ def update_project(project_path, output_callback=None, timeout=120):
 
         returncode, lines = stream_subprocess(
             ["git", "pull"], cwd=str(project_path), timeout=timeout,
+            line_callback=lambda line: output_callback(line + "\n") if output_callback else None,
         )
-        for line in lines:
-            if output_callback:
-                output_callback(line + "\n")
         if returncode == -1:
             return False, f"更新超时 ({timeout}秒)"
 

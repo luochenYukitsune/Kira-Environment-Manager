@@ -134,7 +134,7 @@ class ProcessManager(QObject):
         if self._worker:
             if self._worker.isRunning():
                 # Stop old worker, schedule restart
-                self._worker.stop()
+                # 先连接信号再调用 stop()，避免进程在信号连接前就结束导致回调丢失
                 old_worker = self._worker
                 self._worker = None
 
@@ -157,6 +157,7 @@ class ProcessManager(QObject):
                     self.state_changed.emit(True)
 
                 old_worker.process_finished.connect(_start_new)
+                old_worker.stop()
                 return True
 
             self._worker.deleteLater()

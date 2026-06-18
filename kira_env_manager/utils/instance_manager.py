@@ -179,12 +179,15 @@ class InstanceManager(QObject):
         """停止并清空所有实例"""
         for inst in list(self._instances):
             inst.stop()
-            # stop() 已处理终止逻辑，这里只做最终等待
+            # stop() 已处理终止逻辑，这里做最终等待
             if inst._pm._worker and inst._pm._worker.isRunning():
-                inst._pm.wait_for_stop(1000)
+                stopped = inst._pm.wait_for_stop(1000)
+                if not stopped:
+                    # worker 未能在 1 秒内停止，跳过 deleteLater 避免崩溃
+                    continue
             if hasattr(inst, '_pm') and inst._pm:
                 inst._pm.deleteLater()
-            if hasattr(inst._pm, '_worker') and inst._pm._worker:
+            if hasattr(inst, '_pm') and inst._pm._worker:
                 inst._pm._worker.deleteLater()
             inst.deleteLater()
         self._instances.clear()
@@ -210,7 +213,7 @@ class InstanceManager(QObject):
 
     def running_count(self):
         """返回由 KEM 启动并仍在运行的实例数，避免 UI 线程同步端口探测。"""
-        return sum(1 for inst in self._instances if inst._pm.is_running())
+        return sum(1 for inst in self._instances if inst._pm and inst._pm.is_running())
 
     def running_instances(self):
         return [inst for inst in self._instances if inst._pm and inst._pm.is_running()]

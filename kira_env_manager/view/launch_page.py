@@ -344,7 +344,12 @@ class DownloadDialog(QDialog):
             extra.append("--ignore-webui-version-check")
         custom = self.custom_args_input.text().strip()
         if custom:
-            extra.extend(shlex.split(custom))
+            try:
+                extra.extend(shlex.split(custom))
+            except ValueError:
+                from kira_env_manager.utils.logger import notify_error
+                notify_error("参数错误", "自定义启动参数存在语法错误（如未闭合的引号），请检查后重试", parent=self)
+                return None  # 返回 None 表示参数无效
         return (getattr(self, '_target_path', ''),
                 self.repo_input.text().strip() or KIRA_GITHUB_URL,
                 self._best_route_name,
@@ -352,12 +357,17 @@ class DownloadDialog(QDialog):
 
 
 def _parse_requirements(req_path):
-    """Parse requirements.txt into a set of normalized package names."""
+    """Parse requirements.txt into a set of normalized package names.
+
+    Returns:
+        set of package names on success, None on failure to signal the caller
+        that the requirements file could not be read.
+    """
     required = set()
     try:
         content = Path(req_path).read_text(encoding="utf-8", errors="replace")
     except Exception:
-        return required
+        return None  # 返回 None 表示读取失败，调用方应将其视为检查失败
     for line in content.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or line.startswith("-"):
@@ -406,6 +416,9 @@ class _DepsCheckWorker(QThread):
                         installed.add(name)
 
                 required = _parse_requirements(req)
+                if required is None:
+                    self.finished.emit(False, ["无法读取 requirements.txt"], "依赖文件读取失败")
+                    return
 
                 missing = sorted(p for p in required if p not in installed)
                 ok = len(missing) == 0
@@ -712,10 +725,10 @@ class LaunchPage(QScrollArea):
                     card.refresh_deps()
 
     def _check_orphan_processes(self):
-        """启动时检测残留进程（通过 ProcessManager 状态）"""
+        """启动时检测残留进程（通过端口探测，避免依赖重建后丢失的 _worker 状态）"""
         orphan_instances = []
         for inst in self._im.instances():
-            if inst._pm and inst._pm.is_running():
+            if check_port_open("127.0.0.1", inst.port):
                 orphan_instances.append(inst)
 
         if not orphan_instances:
@@ -750,7 +763,10 @@ class LaunchPage(QScrollArea):
         if dlg.exec_() != QDialog.Accepted:
             return
 
-        target_path, repo_url, route_name, extra_args = dlg.get_result()
+        result = dlg.get_result()
+        if result is None:
+            return  # 参数解析失败，错误已在 get_result 中提示
+        target_path, repo_url, route_name, extra_args = result
         if not target_path or not os.path.exists(target_path):
             return
 
@@ -810,17 +826,22 @@ class LaunchPage(QScrollArea):
 
         # 创建 worker 并启动
         self._setup_worker = SetupWorker(venv_path, req, primary, fallback)
+        worker = self._setup_worker  # 局部引用用于 identity 验证
 
-        self._setup_worker.progress.connect(self._on_setup_progress)
-        self._setup_worker.finished.connect(
-            lambda ok, msg: self._on_setup_done(ok, msg, on_done, project_path, venv_path)
+        worker.progress.connect(self._on_setup_progress)
+        worker.finished.connect(
+            lambda ok, msg, w=worker: self._on_setup_done(ok, msg, w, on_done, project_path, venv_path)
         )
-        self._setup_worker.start()
+        worker.finished.connect(lambda w=worker: w.deleteLater())
+        worker.start()
 
     def _on_setup_progress(self, line):
         append_and_scroll(self.console, line)
 
-    def _on_setup_done(self, ok, msg, on_done=None, project_path=None, venv_path=None):
+    def _on_setup_done(self, ok, msg, worker=None, on_done=None, project_path=None, venv_path=None):
+        # 验证 sender 是当前 worker，防止旧 worker 信号覆盖状态
+        if worker is not None and worker is not self._setup_worker:
+            return
         if self._state_tip:
             self._state_tip.setContent(msg)
             self._state_tip.setState(True)

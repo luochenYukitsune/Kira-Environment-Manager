@@ -214,10 +214,10 @@ def install_requirements(venv_path, requirements_path,
             cmd = pip_cmd + ["install", "-r", str(requirements_path)]
             if m:
                 cmd += ["-i", m]
-            returncode, lines = stream_subprocess(cmd, timeout=timeout)
-            for line in lines:
-                if output_callback:
-                    output_callback(line + "\n")
+            returncode, lines = stream_subprocess(
+                cmd, timeout=timeout,
+                line_callback=lambda line: output_callback(line + "\n") if output_callback else None,
+            )
             if returncode == 0:
                 src_name = m.split("/")[2] if m else "PyPI"
                 return True, f"依赖安装成功 ({src_name})"

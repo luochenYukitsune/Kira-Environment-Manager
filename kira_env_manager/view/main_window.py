@@ -49,7 +49,12 @@ class MainWindow(FluentWindow):
         self._tray = TrayManager(self, self.launch_page, self)
 
         # 背景音乐播放器（自动启动播放）
-        self._music_player = MusicPlayer(self)
+        try:
+            self._music_player = MusicPlayer(self)
+        except Exception:
+            from kira_env_manager.utils.logger import logger
+            logger.warning("背景音乐播放器初始化失败，将以无声模式运行")
+            self._music_player = None
 
         # 恢复暗色模式配置
         dark_mode = cfg_get("dark_mode")
@@ -195,11 +200,15 @@ QComboBox QAbstractItemView {
 
     def _toggle_music(self):
         """切换背景音乐播放/暂停并更新导航图标"""
+        if not self._music_player:
+            return
         playing = self._music_player.toggle_playback()
         self._music_nav_item.setIcon(FIF.MUSIC if playing else FIF.MUTE)
 
     def _select_music(self):
         """选择自定义背景音乐文件"""
+        if not self._music_player:
+            return
         from PyQt5.QtWidgets import QFileDialog
         path, _ = QFileDialog.getOpenFileName(
             self, "选择背景音乐", "",
