@@ -23,7 +23,7 @@ def get_app_data_dir():
         return Path(__file__).parent.parent
 
 
-# KiraAI 默认端口
+# 默认端口
 DEFAULT_PORT = 5267
 
 # 主窗口尺寸
@@ -54,5 +54,11 @@ GRACEFUL_STOP_TIMEOUT = 3
 
 # 线程等待超时 (ms)
 THREAD_WAIT_TIMEOUT = 5000
+
+# 背景音乐文件路径
+MUSIC_FILE_PATH = r"D:\download\沉浸感 Flow Experience.mp3"
+
+# 音乐默认音量 (0-100)
+MUSIC_DEFAULT_VOLUME = 15
 
 

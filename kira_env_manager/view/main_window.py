@@ -7,6 +7,7 @@ from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QMessageBox
 
 from qfluentwidgets import FluentWindow, NavigationItemPosition, FluentIcon as FIF
+from qfluentwidgets import toggleTheme, setTheme, isDarkTheme, Theme
 
 from kira_env_manager.view.home_page import HomePage
 from kira_env_manager.view.env_page import EnvPage
@@ -16,6 +17,7 @@ from kira_env_manager.view.browser_page import BrowserPage
 from kira_env_manager.view.log_page import LogPage
 from kira_env_manager.common.constants import WINDOW_WIDTH, WINDOW_HEIGHT
 from kira_env_manager.utils.tray_manager import TrayManager
+from kira_env_manager.utils.media_player import MusicPlayer
 from kira_env_manager.common.config import get as cfg_get, set_config as cfg_set
 
 
@@ -45,6 +47,17 @@ class MainWindow(FluentWindow):
 
         # 创建系统托盘
         self._tray = TrayManager(self, self.launch_page, self)
+
+        # 背景音乐播放器（自动启动播放）
+        self._music_player = MusicPlayer(self)
+
+        # 恢复暗色模式配置
+        dark_mode = cfg_get("dark_mode")
+        if dark_mode:
+            setTheme(Theme.DARK)
+        else:
+            setTheme(Theme.LIGHT)
+        self._update_app_palette(dark_mode)
 
         from PyQt5.QtWidgets import QApplication
         self.closed_by_tray.connect(
@@ -80,6 +93,38 @@ class MainWindow(FluentWindow):
         # 关闭导航栏 Acrylic 毛玻璃
         self.navigationInterface.setAcrylicEnabled(False)
 
+        # --- 底部操作项 ---
+
+        # 暗色模式切换
+        self._dark_mode_item = self.navigationInterface.addItem(
+            routeKey="darkModeToggle",
+            icon=FIF.BRIGHTNESS,
+            text="深色模式",
+            onClick=self._toggle_dark_mode,
+            selectable=False,
+            position=NavigationItemPosition.BOTTOM,
+        )
+
+        # 背景音乐播放/暂停（图标随播放状态变化）
+        self._music_nav_item = self.navigationInterface.addItem(
+            routeKey="musicToggle",
+            icon=FIF.MUSIC,
+            text="背景音乐",
+            onClick=self._toggle_music,
+            selectable=False,
+            position=NavigationItemPosition.BOTTOM,
+        )
+
+        # 选择自定义音乐文件
+        self.navigationInterface.addItem(
+            routeKey="musicSelect",
+            icon=FIF.MUSIC_FOLDER,
+            text="选择音乐",
+            onClick=self._select_music,
+            selectable=False,
+            position=NavigationItemPosition.BOTTOM,
+        )
+
     def initWindow(self):
         self.resize(WINDOW_WIDTH, WINDOW_HEIGHT)
         self.setWindowTitle("Kira Environment Manager")
@@ -103,6 +148,74 @@ class MainWindow(FluentWindow):
             (geo.width() - self.width()) // 2,
             (geo.height() - self.height()) // 2,
         )
+
+    @staticmethod
+    def _update_app_palette(dark):
+        """暗色调色板 + QComboBox 颜色修复"""
+        from PyQt5.QtGui import QPalette, QColor
+        from PyQt5.QtWidgets import QApplication
+        qApp = QApplication.instance()
+        if qApp is None:
+            return
+        p = QPalette()
+        if dark:
+            p.setColor(QPalette.Window, QColor(45, 45, 45))
+            p.setColor(QPalette.WindowText, QColor(255, 255, 255))
+            p.setColor(QPalette.Base, QColor(30, 30, 30))
+            p.setColor(QPalette.AlternateBase, QColor(45, 45, 45))
+            p.setColor(QPalette.ToolTipBase, QColor(30, 30, 30))
+            p.setColor(QPalette.ToolTipText, QColor(255, 255, 255))
+            p.setColor(QPalette.Text, QColor(255, 255, 255))
+            p.setColor(QPalette.Button, QColor(45, 45, 45))
+            p.setColor(QPalette.ButtonText, QColor(255, 255, 255))
+            p.setColor(QPalette.BrightText, QColor(255, 0, 0))
+            p.setColor(QPalette.Link, QColor(42, 130, 218))
+            p.setColor(QPalette.Highlight, QColor(42, 130, 218))
+            p.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
+            # 只修 QComboBox 下拉列表颜色，不碰全局 QSS
+            qApp.setStyleSheet("""
+QComboBox QAbstractItemView {
+    background-color: #2d2d2d;
+    color: #ffffff;
+    selection-background-color: #2a82da;
+    selection-color: #ffffff;
+}
+""")
+        else:
+            p = QApplication.style().standardPalette()
+            qApp.setStyleSheet("")
+        qApp.setPalette(p)
+
+    def _toggle_dark_mode(self):
+        """切换深色/浅色主题并持久化到配置"""
+        target = Theme.DARK if not isDarkTheme() else Theme.LIGHT
+        setTheme(target)
+        cfg_set("dark_mode", target == Theme.DARK)
+        self._update_app_palette(target == Theme.DARK)
+
+    def _toggle_music(self):
+        """切换背景音乐播放/暂停并更新导航图标"""
+        playing = self._music_player.toggle_playback()
+        self._music_nav_item.setIcon(FIF.MUSIC if playing else FIF.MUTE)
+
+    def _select_music(self):
+        """选择自定义背景音乐文件"""
+        from PyQt5.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择背景音乐", "",
+            "音频文件 (*.mp3 *.wav *.flac *.ogg *.wma);;所有文件 (*)",
+        )
+        if not path:
+            return
+        cfg_set("music_path", path)
+        ok = self._music_player.load_file(path)
+        if ok:
+            from kira_env_manager.utils.logger import notify_success
+            notify_success("音乐已切换", Path(path).name, parent=self)
+            self._music_nav_item.setIcon(FIF.MUSIC)
+        else:
+            from kira_env_manager.utils.logger import notify_error
+            notify_error("音乐加载失败", "文件不存在或无法播放", parent=self)
 
     def changeEvent(self, event):
         if event.type() == event.WindowStateChange:

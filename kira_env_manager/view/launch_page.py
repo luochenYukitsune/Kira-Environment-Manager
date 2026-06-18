@@ -584,6 +584,8 @@ class LaunchPage(QScrollArea):
         self.setObjectName("launchPage")
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # 透明背景：与 QWidget 页面（如首页）保持一致
+        self.viewport().setStyleSheet("background: transparent;")
 
         self._im = InstanceManager(self)
         self._setup_worker = None

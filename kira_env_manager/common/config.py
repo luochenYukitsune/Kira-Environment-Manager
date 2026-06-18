@@ -26,6 +26,7 @@ DEFAULT_CONFIG = {
     "font_path": "",  # 自定义字体路径，空=使用内置默认字体
     "instances": [],  # [{name, port, data_dir, project_path, extra_args}]
     "tray_close_action": "ask",  # "ask"=每次询问 | "minimize"=缩托盘 | "exit"=直接退出
+    "music_path": "",  # 自定义背景音乐路径，空=使用内嵌默认音乐
 }
 
 CONFIG_FILE = get_app_data_dir() / "manager_config.json"

@@ -45,6 +45,8 @@ class ProjectPage(QScrollArea):
         self.setObjectName("projectPage")
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # 透明背景：与 QWidget 页面（如首页）保持一致
+        self.viewport().setStyleSheet("background: transparent;")
 
         self._worker = None
         self._state_tooltip = None
