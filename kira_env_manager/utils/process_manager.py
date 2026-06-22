@@ -174,14 +174,29 @@ class ProcessManager(QObject):
             return self._worker.wait(timeout)
         return True
 
+    def _is_current_worker_signal(self):
+        """忽略来自已被替换的旧 worker 的滞后信号。
+
+        start() 会替换“已结束但 process_finished 尚未投递”的旧 worker；旧 worker
+        排队中的 process_finished 若投递到 _on_finished，会把刚建好的新进程的 _pid
+        置 None 并触发下游 clear_running_pid，误删新进程记录。"""
+        sender = self.sender()
+        return sender is None or sender is self._worker
+
     def _on_pid_ready(self, pid):
+        if not self._is_current_worker_signal():
+            return
         self._pid = pid
         self.pid_ready.emit(pid)
 
     def _on_output(self, line):
+        if not self._is_current_worker_signal():
+            return
         self.output_received.emit(line)
 
     def _on_finished(self, exit_code):
+        if not self._is_current_worker_signal():
+            return
         self._pid = None
         self.state_changed.emit(False)
         self.finished.emit(exit_code)

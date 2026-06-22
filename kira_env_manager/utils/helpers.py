@@ -237,8 +237,9 @@ def detach_thread_until_finished(thread):
         thread.setParent(None)
     except Exception:
         pass
-    if thread not in _orphan_threads:
-        _orphan_threads.append(thread)
+    if thread in _orphan_threads:
+        return  # 已寄存，避免重复连接 finished
+    _orphan_threads.append(thread)
 
     def _release():
         try:
