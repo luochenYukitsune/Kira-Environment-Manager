@@ -93,6 +93,7 @@ class InstallWorker(QThread):
             mirror_url=self.mirror_url,
             fallback_mirrors=self.fallback_mirrors,
             output_callback=lambda line: self.line_output.emit(line) if not self.isInterruptionRequested() else None,
+            should_cancel=self.isInterruptionRequested,
         )
         self.finished.emit(ok, msg)
 
@@ -307,7 +308,7 @@ class EnvPage(QScrollArea):
 
     def _auto_detect(self):
         v, p = detect_python()
-        if v:
+        if p:  # 用路径判断：detect_python 失败时返回 ("未检测到", "")，v 恒为真
             self.python_card.setContent(f"Python {v}  ({p})")
             self.download_widget.setVisible(False)
         else:
@@ -317,7 +318,7 @@ class EnvPage(QScrollArea):
 
     def _detect_python(self):
         v, p = detect_python()
-        if v:
+        if p:  # 用路径判断：detect_python 失败时返回 ("未检测到", "")，v 恒为真
             self.python_card.setContent(f"Python {v}  ({p})")
             self.download_widget.setVisible(False)
             notify_success("Python 已检测", f"版本: {v}\n路径: {p}", parent=self)
@@ -526,19 +527,20 @@ class EnvPage(QScrollArea):
         self.console.clear()
         self.console.append(f">>> 使用镜像: {mirror_name}\n")
         self.install_card.setEnabled(False)
-        # Cancel conflicting tasks
-        for attr in ['_speedtest_worker', '_venv_worker']:
+        # 取消冲突 / 上一次安装任务；若无法及时结束则不再启动新任务，
+        # 避免两个 pip 同时写入同一 venv 造成 site-packages 损坏。
+        for attr in ['_speedtest_worker', '_venv_worker', '_install_worker']:
             w = getattr(self, attr)
             if w and w.isRunning():
                 w.requestInterruption()
                 w.quit()
                 w.wait(3000)
-                setattr(self, attr, None)
-        # Cancel previous install worker
-        if self._install_worker and self._install_worker.isRunning():
-            self._install_worker.requestInterruption()
-            self._install_worker.quit()
-            self._install_worker.wait(3000)
+                if w.isRunning():
+                    self.install_card.setEnabled(True)
+                    notify_warning("请稍候", "上一个任务仍在结束中，请稍后重试", parent=self)
+                    return
+                if attr != '_install_worker':
+                    setattr(self, attr, None)
         self._tooltip = StateToolTip("正在安装依赖", "请稍候...", self.window())
         self._tooltip.move(self._tooltip.getSuitablePos())
         self._tooltip.show()
@@ -569,3 +571,16 @@ class EnvPage(QScrollArea):
             logger.error(f"依赖安装失败: {msg}")
             notify_error("失败", msg, parent=self)
         self._refresh_dep_status()
+
+    def cleanup(self):
+        """退出前取消并等待所有后台 worker，避免销毁运行中的 QThread。
+        未能及时结束的 worker 脱离父对象并寄存，让其自然结束后再释放。"""
+        for attr in ('_speedtest_worker', '_venv_worker', '_install_worker', '_dep_worker'):
+            w = getattr(self, attr, None)
+            if w and w.isRunning():
+                w.requestInterruption()
+                w.quit()
+                if not w.wait(3000):
+                    from kira_env_manager.utils.helpers import detach_thread_until_finished
+                    detach_thread_until_finished(w)
+            setattr(self, attr, None)

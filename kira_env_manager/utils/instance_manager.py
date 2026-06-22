@@ -5,7 +5,7 @@ import copy
 from PyQt5.QtCore import QObject, pyqtSignal
 
 from kira_env_manager.utils.process_manager import ProcessManager
-from kira_env_manager.utils.helpers import check_port_open
+from kira_env_manager.utils.helpers import record_running_pid, clear_running_pid
 
 
 class KiraInstance(QObject):
@@ -29,6 +29,7 @@ class KiraInstance(QObject):
         self._pm.output_received.connect(self.output_line)
         self._pm.state_changed.connect(self._on_state)
         self._pm.finished.connect(self._on_finished)
+        self._pm.pid_ready.connect(self._on_pid_ready)
 
     @property
     def name(self):
@@ -51,8 +52,9 @@ class KiraInstance(QObject):
         return self.cfg.get("project_path", "")
 
     def is_running(self):
-        """通过端口检测是否在运行"""
-        return check_port_open("127.0.0.1", self.port)
+        """是否在运行 —— 以进程 worker 存活为唯一真相源（与卡片状态、停止
+        按钮、退出确认保持一致）。端口探测仅用于跨会话残留检测。"""
+        return self._pm.is_running()
 
     def start(self, python_exe):
         """启动该实例
@@ -93,8 +95,19 @@ class KiraInstance(QObject):
         self._running = running
         self.state_changed.emit(running)
 
+    def _on_pid_ready(self, pid):
+        # 持久化 PID，供下次启动检测/终止跨会话残留进程
+        try:
+            record_running_pid(self.port, pid)
+        except Exception:
+            pass
+
     def _on_finished(self, exit_code):
         self._running = False
+        try:
+            clear_running_pid(self.port)
+        except Exception:
+            pass
         self.finished.emit(exit_code)
 
 
@@ -177,22 +190,41 @@ class InstanceManager(QObject):
 
     def clear(self):
         """停止并清空所有实例"""
+        if not hasattr(self, '_pending_cleanup'):
+            self._pending_cleanup = []
         for inst in list(self._instances):
             inst.stop()
             # stop() 已处理终止逻辑，这里做最终等待
             if inst._pm._worker and inst._pm._worker.isRunning():
                 stopped = inst._pm.wait_for_stop(1000)
                 if not stopped:
-                    # worker 未能在 1 秒内停止，跳过 deleteLater 避免崩溃
+                    # worker 未能在 1 秒内停止：保留强引用并延迟到 finished 后清理，
+                    # 避免在销毁运行中的 QThread 的同时丢掉唯一引用（原 continue
+                    # 之后 self._instances.clear() 会丢引用，导致孤儿线程/崩溃）。
+                    self._pending_cleanup.append(inst)
+                    inst._pm._worker.finished.connect(
+                        lambda inst=inst: self._finalize_cleanup(inst)
+                    )
                     continue
-            if hasattr(inst, '_pm') and inst._pm:
-                inst._pm.deleteLater()
-            if hasattr(inst, '_pm') and inst._pm._worker:
-                inst._pm._worker.deleteLater()
-            inst.deleteLater()
+            self._delete_inst(inst)
         self._instances.clear()
         self._active_instance = None
         self.instances_changed.emit()
+
+    def _delete_inst(self, inst):
+        """删除实例及其进程管理器 / worker 的 QObject。"""
+        pm = getattr(inst, '_pm', None)
+        if pm:
+            if pm._worker:
+                pm._worker.deleteLater()
+            pm.deleteLater()
+        inst.deleteLater()
+
+    def _finalize_cleanup(self, inst):
+        """延迟清理：worker 真正结束后再删除，期间由 _pending_cleanup 持有引用。"""
+        if inst in getattr(self, '_pending_cleanup', []):
+            self._pending_cleanup.remove(inst)
+        self._delete_inst(inst)
 
     def instance(self, index):
         if 0 <= index < len(self._instances):

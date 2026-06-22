@@ -55,6 +55,7 @@ def detect_python():
             result = subprocess.run(
                 [path, "--version"],
                 capture_output=True, text=True, timeout=10,
+                encoding="utf-8", errors="replace",
                 creationflags=CREATE_NO_WINDOW,
             )
             if result.returncode == 0:
@@ -114,17 +115,33 @@ def create_venv(venv_path, python_exe=None):
         venv_result = subprocess.run(
             [python_exe, "-m", "venv", str(venv_path)],
             capture_output=True, text=True, timeout=120,
+            encoding="utf-8", errors="replace",
             creationflags=CREATE_NO_WINDOW,
         )
         if venv_result.returncode != 0:
             err = venv_result.stderr.strip() or venv_result.stdout.strip() or "未知错误"
             return False, f"venv 创建失败: {err}"
         pip_cmd = get_venv_pip_cmd(str(venv_path))
-        subprocess.run(
-            pip_cmd + ["install", "--upgrade", "pip"],
-            capture_output=True, text=True, timeout=120,
-            creationflags=CREATE_NO_WINDOW,
-        )
+        try:
+            upgrade = subprocess.run(
+                pip_cmd + ["install", "--upgrade", "pip"],
+                capture_output=True, text=True, timeout=120,
+                encoding="utf-8", errors="replace",
+                creationflags=CREATE_NO_WINDOW,
+            )
+        except subprocess.TimeoutExpired:
+            # venv 本体已创建成功，仅 pip 升级超时——降级为可恢复结果，
+            # 否则外层会误报“创建超时(False)”，且重试会被“路径已存在”卡住。
+            import logging
+            logging.getLogger(__name__).warning("pip 升级超时，虚拟环境已创建: %s", venv_path)
+            return True, f"虚拟环境创建成功（pip 升级超时，可稍后重试）: {venv_path}"
+        if upgrade.returncode != 0:
+            import logging
+            err = (upgrade.stderr or upgrade.stdout or "").strip()[:200]
+            logging.getLogger(__name__).warning(
+                "pip 升级失败 (rc=%s): %s", upgrade.returncode, err
+            )
+            return True, f"虚拟环境创建成功（pip 升级失败，可稍后重试）: {venv_path}"
         return True, f"虚拟环境创建成功: {venv_path}"
     except subprocess.TimeoutExpired:
         return False, "创建超时"
@@ -188,7 +205,7 @@ def check_dependencies_installed(venv_path, requirements_path):
 
 def install_requirements(venv_path, requirements_path,
                          mirror_url=None, fallback_mirrors=None,
-                         output_callback=None, timeout=600):
+                         output_callback=None, timeout=600, should_cancel=None):
     """安装依赖（使用 python -m pip 调用，兼容性更好）"""
     try:
         pip_cmd = get_venv_pip_cmd(str(venv_path))
@@ -217,7 +234,10 @@ def install_requirements(venv_path, requirements_path,
             returncode, lines = stream_subprocess(
                 cmd, timeout=timeout,
                 line_callback=lambda line: output_callback(line + "\n") if output_callback else None,
+                should_cancel=should_cancel,
             )
+            if should_cancel and should_cancel():
+                return False, "已取消"
             if returncode == 0:
                 src_name = m.split("/")[2] if m else "PyPI"
                 return True, f"依赖安装成功 ({src_name})"

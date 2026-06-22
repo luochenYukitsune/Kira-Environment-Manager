@@ -137,6 +137,19 @@ class HomePage(QWidget):
         worker.finished.connect(lambda w=worker: w.deleteLater())
         worker.start()
 
+    def cleanup(self):
+        """退出前等待状态检测线程结束，避免销毁运行中的 QThread。
+        worker 以本页为父对象，若未能及时结束（检测子进程为阻塞调用、不可中断），
+        必须 setParent(None) 脱离父对象并寄存，否则本页销毁会连带销毁仍在运行的线程。"""
+        w = getattr(self, '_status_worker', None)
+        if w and w.isRunning():
+            w.requestInterruption()
+            w.quit()
+            if not w.wait(3000):
+                from kira_env_manager.utils.helpers import detach_thread_until_finished
+                detach_thread_until_finished(w)
+        self._status_worker = None
+
     def showEvent(self, event):
         super().showEvent(event)
         QTimer.singleShot(0, self._async_refresh_status)

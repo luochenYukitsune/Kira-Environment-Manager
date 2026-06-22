@@ -37,6 +37,8 @@ class TrayManager(QSystemTrayIcon):
 
         # 连接信号
         self.activated.connect(self._on_activated)
+        # 打开前重建：保证菜单永远是最新的，且不会在菜单显示时被重建
+        self._menu.aboutToShow.connect(self._build_menu)
         self._im.instances_changed.connect(self._rebuild_menu)
 
         self.show()
@@ -85,7 +87,10 @@ class TrayManager(QSystemTrayIcon):
         quit_action.triggered.connect(self._quit_app)
 
     def _rebuild_menu(self):
-        """实例列表变化时重建菜单"""
+        """实例列表变化时重建菜单；菜单正在显示时跳过，避免清空正在 hover 的项
+        导致闪烁/塌陷（下次打开由 aboutToShow 兜底重建）。"""
+        if self._menu.isVisible():
+            return
         self._build_menu()
 
     def _on_activated(self, reason):
@@ -123,7 +128,9 @@ class TrayManager(QSystemTrayIcon):
         )
 
     def _quit_app(self):
-        """完全退出 — closeEvent handles confirm dialog and emits closed_by_tray if accepted"""
+        """完全退出 —— 置 _force_quit 绕过最小化/询问分支，再由 closeEvent 完成
+        运行中实例确认 + 后台线程清理 + 退出。"""
+        self._main_window._force_quit = True
         self._main_window.close()
 
     def show_minimize_notification(self):

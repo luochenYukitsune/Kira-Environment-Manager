@@ -3,13 +3,14 @@
 import subprocess
 import os
 import threading
-from PyQt5.QtCore import QObject, QThread, pyqtSignal, QMutex, QMutexLocker
+from PyQt5.QtCore import QObject, QThread, pyqtSignal
 
 
 class _ProcessWorker(QThread):
     """在子线程中运行进程并捕获输出"""
     output_line = pyqtSignal(str)
     process_finished = pyqtSignal(int)
+    pid_ready = pyqtSignal(int)         # 子进程创建后上报真实 PID
 
     def __init__(self, cmd, cwd=None, env=None):
         super().__init__()
@@ -43,6 +44,7 @@ class _ProcessWorker(QThread):
                 env=env,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
             )
+            self.pid_ready.emit(self._process.pid)
 
             try:
                 for line in self._process.stdout:
@@ -106,12 +108,16 @@ class ProcessManager(QObject):
     output_received = pyqtSignal(str)
     state_changed = pyqtSignal(bool)
     finished = pyqtSignal(int)
+    pid_ready = pyqtSignal(int)         # 转发子进程 PID（供持久化 / 残留检测）
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._worker = None
-        self._restarting = False
-        self._restarting_mutex = QMutex()
+        self._pid = None
+
+    @property
+    def pid(self):
+        return self._pid
 
     def is_running(self):
         """Single source of truth: worker is alive and not being stopped."""
@@ -131,41 +137,17 @@ class ProcessManager(QObject):
             self.output_received.emit("[WARN] 进程已在运行中\n")
             return False
 
+        # 调用方在实例运行时不会走到这里（启动按钮在运行态被禁用，stop→start
+        # 才是重启路径）。此处只可能遇到“上次 worker 已结束但尚未清理”的情况，
+        # 释放后重建即可。
         if self._worker:
-            if self._worker.isRunning():
-                # Stop old worker, schedule restart
-                # 先连接信号再调用 stop()，避免进程在信号连接前就结束导致回调丢失
-                old_worker = self._worker
-                self._worker = None
-
-                locker = QMutexLocker(self._restarting_mutex)
-                self._restarting = True
-
-                def _start_new():
-                    locker2 = QMutexLocker(self._restarting_mutex)
-                    if not self._restarting:
-                        return  # cancelled by stop() during transition
-                    self._restarting = False
-                    del locker2
-                    if old_worker.isRunning():
-                        old_worker.wait(500)
-                    old_worker.deleteLater()
-                    self._worker = _ProcessWorker(cmd, cwd, env)
-                    self._worker.output_line.connect(self._on_output)
-                    self._worker.process_finished.connect(self._on_finished)
-                    self._worker.start()
-                    self.state_changed.emit(True)
-
-                old_worker.process_finished.connect(_start_new)
-                old_worker.stop()
-                return True
-
             self._worker.deleteLater()
             self._worker = None
 
         self._worker = _ProcessWorker(cmd, cwd, env)
         self._worker.output_line.connect(self._on_output)
         self._worker.process_finished.connect(self._on_finished)
+        self._worker.pid_ready.connect(self._on_pid_ready)
         self._worker.start()
 
         self.state_changed.emit(True)
@@ -177,11 +159,6 @@ class ProcessManager(QObject):
         taskkill /F 通常瞬间完成；进程结束后由 process_finished 信号
         异步处理状态和清理，无需在 UI 线程中 wait()。
         """
-        locker = QMutexLocker(self._restarting_mutex)
-        if self._restarting:
-            self._restarting = False
-            return  # cancel pending restart; old process already being stopped
-
         if not self._worker:
             return
 
@@ -197,9 +174,29 @@ class ProcessManager(QObject):
             return self._worker.wait(timeout)
         return True
 
+    def _is_current_worker_signal(self):
+        """忽略来自已被替换的旧 worker 的滞后信号。
+
+        start() 会替换“已结束但 process_finished 尚未投递”的旧 worker；旧 worker
+        排队中的 process_finished 若投递到 _on_finished，会把刚建好的新进程的 _pid
+        置 None 并触发下游 clear_running_pid，误删新进程记录。"""
+        sender = self.sender()
+        return sender is None or sender is self._worker
+
+    def _on_pid_ready(self, pid):
+        if not self._is_current_worker_signal():
+            return
+        self._pid = pid
+        self.pid_ready.emit(pid)
+
     def _on_output(self, line):
+        if not self._is_current_worker_signal():
+            return
         self.output_received.emit(line)
 
     def _on_finished(self, exit_code):
+        if not self._is_current_worker_signal():
+            return
+        self._pid = None
         self.state_changed.emit(False)
         self.finished.emit(exit_code)
