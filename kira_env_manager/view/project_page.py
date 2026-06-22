@@ -37,7 +37,10 @@ class PullWorker(QThread):
         cb = lambda line: self.line_output.emit(line) if not self.isInterruptionRequested() else None
         if self.isInterruptionRequested():
             return
-        ok, msg = update_project(self.project_path, output_callback=cb)
+        ok, msg = update_project(
+            self.project_path, output_callback=cb,
+            should_cancel=self.isInterruptionRequested,
+        )
         self.finished.emit(ok, msg)
 
 
@@ -228,3 +231,13 @@ class ProjectPage(QScrollArea):
     def _open_git_download(self):
         import webbrowser
         webbrowser.open("https://git-scm.com/downloads")
+
+    def cleanup(self):
+        """退出前取消并等待后台 git 任务，避免销毁运行中的 QThread。
+        若未能及时结束则保留引用，不置空。"""
+        if self._worker and self._worker.isRunning():
+            self._worker.requestInterruption()
+            self._worker.quit()
+            if not self._worker.wait(3000):
+                return
+        self._worker = None

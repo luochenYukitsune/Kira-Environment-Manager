@@ -175,9 +175,11 @@ class LogPage(QWidget):
             notify_error("失败", f"清空日志失败: {e}", parent=self)
 
     def _open_log_dir(self):
-        """打开日志目录"""
-        import subprocess
-        if os.path.exists(LOG_DIR):
-            subprocess.Popen(["explorer", str(LOG_DIR)])
-        else:
+        """打开日志目录（跨平台）"""
+        if not os.path.exists(LOG_DIR):
             notify_warning("提示", "日志目录不存在", parent=self)
+            return
+        from PyQt5.QtGui import QDesktopServices
+        from PyQt5.QtCore import QUrl
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(LOG_DIR))):
+            notify_error("失败", "无法打开日志目录", parent=self)

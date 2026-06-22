@@ -215,7 +215,9 @@ def _install_excepthook():
         def thread_excepthook(args):
             tb_text = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_tb))
             logger.critical(f"线程未处理异常:\n{tb_text}")
-            if _original_thread_hook:
+            # 仅在原钩子非默认实现时才转发：默认 threading.excepthook 会写
+            # sys.stderr，而 stderr 已被重定向回 logger，转发会导致重复记录。
+            if _original_thread_hook and _original_thread_hook is not getattr(threading, '__excepthook__', None):
                 _original_thread_hook(args)
 
         threading.excepthook = thread_excepthook

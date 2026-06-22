@@ -56,10 +56,12 @@ def build_clone_url_from_results(results, repo):
     """从测速结果构建最快的 clone URL"""
     from kira_env_manager.utils.network import GITHUB_ROUTES, convert_to_clone_url
 
-    if not results:
+    # 仅采用可达(延迟非 None)的线路；全部不可达时回退直连，避免把超时线路当最快
+    reachable = [r for r in (results or []) if r[1] is not None]
+    if not reachable:
         return f"https://github.com/{repo}.git", "直连"
 
-    best_name = results[0][0]
+    best_name = reachable[0][0]
     for route in GITHUB_ROUTES:
         if route[0] == best_name:
             return convert_to_clone_url(route, repo), best_name
@@ -107,6 +109,96 @@ def check_port_open(host, port, timeout=0.1):
         return False
 
 
+def _pid_state_file():
+    from kira_env_manager.common.constants import get_app_data_dir
+    return get_app_data_dir() / "running_pids.json"
+
+
+_pid_lock = threading.Lock()
+
+
+def read_running_pids() -> dict:
+    """读取上次会话持久化的 {port(str): pid} 映射；文件缺失/损坏返回空。"""
+    import json
+    try:
+        with _pid_lock:
+            f = _pid_state_file()
+            if not f.exists():
+                return {}
+            data = json.loads(f.read_text(encoding="utf-8"))
+            return {str(k): int(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_running_pids(data: dict):
+    import json
+    try:
+        with _pid_lock:
+            f = _pid_state_file()
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(json.dumps(data), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def record_running_pid(port, pid):
+    """记录某端口对应的进程 PID，供下次启动检测残留进程。"""
+    if not pid:
+        return
+    data = read_running_pids()
+    data[str(port)] = int(pid)
+    _write_running_pids(data)
+
+
+def clear_running_pid(port):
+    """进程正常结束时清除持久化的 PID 记录。"""
+    data = read_running_pids()
+    if data.pop(str(port), None) is not None:
+        _write_running_pids(data)
+
+
+def kill_pid(pid):
+    """按 PID 终止进程树（精确，不依赖端口反查，避免误杀）。返回是否尝试成功。"""
+    import os
+    try:
+        if os.name == 'nt':
+            subprocess.run(
+                ['taskkill', '/F', '/T', '/PID', str(pid)],
+                capture_output=True, creationflags=CREATE_NO_WINDOW, timeout=5,
+            )
+        else:
+            import signal as _signal
+            os.kill(int(pid), _signal.SIGTERM)
+        return True
+    except Exception:
+        return False
+
+
+def pid_alive(pid):
+    """判断 PID 是否仍存活（跨平台，尽力而为）。"""
+    import os
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if os.name == 'nt':
+        try:
+            out = subprocess.run(
+                ['tasklist', '/FI', f'PID eq {pid}', '/NH'],
+                capture_output=True, text=True, creationflags=CREATE_NO_WINDOW, timeout=5,
+            )
+            return str(pid) in (out.stdout or "")
+        except Exception:
+            return True  # 无法确认时保守认为存活
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+
 def create_state_tooltip(title, content, parent):
     """创建并显示 StateToolTip，返回实例（调用方负责 .setContent / .setState）"""
     tip = StateToolTip(title, content, parent.window() if hasattr(parent, 'window') else parent)
@@ -146,6 +238,7 @@ def stream_subprocess(
     timeout: float | None = None,
     merge_stderr: bool = True,
     line_callback: Optional[Callable[[str], None]] = None,
+    should_cancel: Optional[Callable[[], bool]] = None,
 ) -> Tuple[int, List[str]]:
     """Run subprocess, return (returncode, stdout_lines).
 
@@ -153,6 +246,11 @@ def stream_subprocess(
     merge_stderr=False: stderr consumed by daemon thread to prevent deadlock.
     line_callback: if provided, called synchronously for each line as it is
                    read, enabling real-time UI updates.
+    should_cancel: if provided, a daemon thread polls it every 0.2s and
+                   terminates the child process when it returns True — this
+                   lets a caller (e.g. a QThread worker) actually cancel an
+                   otherwise-blocking pip/git call instead of merely setting a
+                   flag the blocking read never observes.
     Applies CREATE_NO_WINDOW on Windows, utf-8 with replace on decode errors.
     """
     stderr = subprocess.STDOUT if merge_stderr else subprocess.PIPE
@@ -171,6 +269,25 @@ def stream_subprocess(
                 pass
         threading.Thread(target=_drain_stderr, daemon=True).start()
 
+    # 取消看门狗：轮询 should_cancel()，为真时终止子进程，使阻塞的读循环结束
+    cancel_stop = None
+    if should_cancel is not None:
+        cancel_stop = threading.Event()
+
+        def _watch_cancel():
+            while not cancel_stop.wait(0.2):
+                if should_cancel():
+                    try:
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                    except (ProcessLookupError, OSError):
+                        pass
+                    return
+        threading.Thread(target=_watch_cancel, daemon=True).start()
+
     lines: List[str] = []
     try:
         for line in proc.stdout:
@@ -187,3 +304,6 @@ def stream_subprocess(
             pass
         proc.wait()
         return -1, lines
+    finally:
+        if cancel_stop is not None:
+            cancel_stop.set()

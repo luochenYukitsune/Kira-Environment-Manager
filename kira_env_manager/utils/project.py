@@ -79,7 +79,7 @@ def clone_repo(url, target_path, output_callback=None, timeout=300):
         return False, f"克隆出错: {str(e)}"
 
 
-def update_project(project_path, output_callback=None, timeout=120):
+def update_project(project_path, output_callback=None, timeout=120, should_cancel=None):
     """更新项目 (git pull)
 
     Returns:
@@ -96,7 +96,10 @@ def update_project(project_path, output_callback=None, timeout=120):
         returncode, lines = stream_subprocess(
             ["git", "pull"], cwd=str(project_path), timeout=timeout,
             line_callback=lambda line: output_callback(line + "\n") if output_callback else None,
+            should_cancel=should_cancel,
         )
+        if should_cancel and should_cancel():
+            return False, "已取消"
         if returncode == -1:
             return False, f"更新超时 ({timeout}秒)"
 

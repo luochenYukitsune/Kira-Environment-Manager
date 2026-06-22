@@ -3,13 +3,14 @@
 import subprocess
 import os
 import threading
-from PyQt5.QtCore import QObject, QThread, pyqtSignal, QMutex, QMutexLocker
+from PyQt5.QtCore import QObject, QThread, pyqtSignal, QMutex, QMutexLocker, QTimer
 
 
 class _ProcessWorker(QThread):
     """在子线程中运行进程并捕获输出"""
     output_line = pyqtSignal(str)
     process_finished = pyqtSignal(int)
+    pid_ready = pyqtSignal(int)         # 子进程创建后上报真实 PID
 
     def __init__(self, cmd, cwd=None, env=None):
         super().__init__()
@@ -43,6 +44,7 @@ class _ProcessWorker(QThread):
                 env=env,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
             )
+            self.pid_ready.emit(self._process.pid)
 
             try:
                 for line in self._process.stdout:
@@ -106,12 +108,22 @@ class ProcessManager(QObject):
     output_received = pyqtSignal(str)
     state_changed = pyqtSignal(bool)
     finished = pyqtSignal(int)
+    pid_ready = pyqtSignal(int)         # 转发子进程 PID（供持久化 / 残留检测）
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._worker = None
+        self._pid = None
         self._restarting = False
         self._restarting_mutex = QMutex()
+        # 重启过渡状态（由 _start_new_worker 消费）
+        self._old_worker = None
+        self._pending_restart = None
+        self._restart_done = True
+
+    @property
+    def pid(self):
+        return self._pid
 
     def is_running(self):
         """Single source of truth: worker is alive and not being stopped."""
@@ -133,31 +145,32 @@ class ProcessManager(QObject):
 
         if self._worker:
             if self._worker.isRunning():
-                # Stop old worker, schedule restart
-                # 先连接信号再调用 stop()，避免进程在信号连接前就结束导致回调丢失
+                # 停止旧 worker 并安排重启。_start_new_worker 是 ProcessManager 的
+                # 绑定方法（QObject 处于 GUI 线程），因此 old_worker 在工作线程发出的
+                # process_finished 会以 QueuedConnection 投递到 GUI 线程——届时 run()
+                # 已返回、old_worker 已结束，可安全删除并启动新 worker。
                 old_worker = self._worker
                 self._worker = None
 
+                # 旧 worker 的 process_finished 此后只用于驱动重启；断开生命周期
+                # 回调，避免重启过程中误发 finished/state_changed(False)，以及旧进程
+                # 退出时 clear_running_pid 与新进程 record_running_pid 相互竞争。
+                try:
+                    old_worker.process_finished.disconnect(self._on_finished)
+                except (TypeError, RuntimeError):
+                    pass
+
                 locker = QMutexLocker(self._restarting_mutex)
                 self._restarting = True
+                self._restart_done = False
+                self._old_worker = old_worker
+                self._pending_restart = (cmd, cwd, env)
 
-                def _start_new():
-                    locker2 = QMutexLocker(self._restarting_mutex)
-                    if not self._restarting:
-                        return  # cancelled by stop() during transition
-                    self._restarting = False
-                    del locker2
-                    if old_worker.isRunning():
-                        old_worker.wait(500)
-                    old_worker.deleteLater()
-                    self._worker = _ProcessWorker(cmd, cwd, env)
-                    self._worker.output_line.connect(self._on_output)
-                    self._worker.process_finished.connect(self._on_finished)
-                    self._worker.start()
-                    self.state_changed.emit(True)
-
-                old_worker.process_finished.connect(_start_new)
+                old_worker.process_finished.connect(self._start_new_worker)
                 old_worker.stop()
+                # 兜底：若进程无法收割导致 process_finished 永不触发，5s 后在 GUI
+                # 线程强制推进，避免重启被静默丢失且 _restarting 永久卡 True。
+                QTimer.singleShot(5000, self._start_new_worker)
                 return True
 
             self._worker.deleteLater()
@@ -166,6 +179,7 @@ class ProcessManager(QObject):
         self._worker = _ProcessWorker(cmd, cwd, env)
         self._worker.output_line.connect(self._on_output)
         self._worker.process_finished.connect(self._on_finished)
+        self._worker.pid_ready.connect(self._on_pid_ready)
         self._worker.start()
 
         self.state_changed.emit(True)
@@ -197,9 +211,47 @@ class ProcessManager(QObject):
             return self._worker.wait(timeout)
         return True
 
+    def _start_new_worker(self):
+        """重启过渡的第二阶段：旧 worker 结束(或兜底超时)后在 GUI 线程启动新进程。
+        幂等：process_finished 信号与兜底定时器都可触发，只执行一次。"""
+        locker = QMutexLocker(self._restarting_mutex)
+        if self._restart_done or not self._restarting:
+            return  # 已触发过，或已被 stop() 取消
+        old = self._old_worker
+        if old is not None and old.isRunning():
+            old.wait(1000)
+            if old.isRunning():
+                # 仅可能在兜底定时器(GUI 线程)触发时到此：旧进程无法收割。
+                # 不删除运行中的 QThread、不抢占端口；保留引用避免崩溃，放弃本次重启。
+                from kira_env_manager.utils.logger import logger
+                logger.error("重启失败：旧进程未能终止，已取消自动重启")
+                self.output_received.emit("\n[ERROR] 旧进程未能终止，重启已取消\n")
+                self._restart_done = True
+                self._restarting = False
+                self.state_changed.emit(False)
+                return
+        self._restart_done = True
+        self._restarting = False
+        if old is not None:
+            old.deleteLater()
+            self._old_worker = None
+        cmd, cwd, env = self._pending_restart
+        self._pending_restart = None
+        self._worker = _ProcessWorker(cmd, cwd, env)
+        self._worker.output_line.connect(self._on_output)
+        self._worker.process_finished.connect(self._on_finished)
+        self._worker.pid_ready.connect(self._on_pid_ready)
+        self._worker.start()
+        self.state_changed.emit(True)
+
+    def _on_pid_ready(self, pid):
+        self._pid = pid
+        self.pid_ready.emit(pid)
+
     def _on_output(self, line):
         self.output_received.emit(line)
 
     def _on_finished(self, exit_code):
+        self._pid = None
         self.state_changed.emit(False)
         self.finished.emit(exit_code)

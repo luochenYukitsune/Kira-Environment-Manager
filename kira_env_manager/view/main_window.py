@@ -27,6 +27,9 @@ class MainWindow(FluentWindow):
     def __init__(self):
         super().__init__()
 
+        # 托盘「退出」置 True 以绕过 closeEvent 的最小化/询问分支（见 closeEvent）
+        self._force_quit = False
+
         # 关闭 Mica 毛玻璃背景 —— 每次动画帧都触发 DWM 合成，严重拖低帧率
         self.setMicaEffectEnabled(False)
 
@@ -261,46 +264,46 @@ QComboBox QAbstractItemView {
         from PyQt5.QtWidgets import QCheckBox
         from kira_env_manager.utils.logger import logger
 
+        # 托盘「退出」会置 _force_quit（一次性）；为真时绕过 ask/最小化分支，
+        # 直接走"确认运行中实例 → 清理 → 退出"，否则托盘退出在 minimize 模式
+        # 下会被 minimize 分支 event.ignore() 无限拦截，程序永远退不掉。
+        force_quit = getattr(self, "_force_quit", False)
+        self._force_quit = False
         action = cfg_get("tray_close_action")
 
-        if action == "ask":
-            msg_box = QMessageBox(self)
-            msg_box.setWindowTitle("Kira Environment Manager")
-            msg_box.setText("要关闭程序还是最小化到系统托盘？")
-            msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
-            msg_box.button(QMessageBox.Yes).setText("最小化到托盘")
-            msg_box.button(QMessageBox.No).setText("退出")
-            msg_box.setDefaultButton(QMessageBox.Yes)
+        if not force_quit:
+            if action == "ask":
+                msg_box = QMessageBox(self)
+                msg_box.setWindowTitle("Kira Environment Manager")
+                msg_box.setText("要关闭程序还是最小化到系统托盘？")
+                msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
+                msg_box.button(QMessageBox.Yes).setText("最小化到托盘")
+                msg_box.button(QMessageBox.No).setText("退出")
+                msg_box.setDefaultButton(QMessageBox.Yes)
 
-            cb = QCheckBox("不再询问，记住我的选择")
-            msg_box.setCheckBox(cb)
+                cb = QCheckBox("不再询问，记住我的选择")
+                msg_box.setCheckBox(cb)
 
-            reply = msg_box.exec_()
+                reply = msg_box.exec_()
 
-            if reply == QMessageBox.Cancel:
-                event.ignore()
-                return
+                if reply == QMessageBox.Cancel:
+                    event.ignore()
+                    return
 
-            if cb.isChecked():
-                cfg_set("tray_close_action", "minimize" if reply == QMessageBox.Yes else "exit")
+                if cb.isChecked():
+                    cfg_set("tray_close_action", "minimize" if reply == QMessageBox.Yes else "exit")
 
-            if reply == QMessageBox.Yes:
+                if reply == QMessageBox.Yes:
+                    event.ignore()
+                    QTimer.singleShot(50, self._minimize_to_tray)
+                    return
+
+            elif action == "minimize":
                 event.ignore()
                 QTimer.singleShot(50, self._minimize_to_tray)
                 return
 
-        elif action == "minimize":
-            event.ignore()
-            QTimer.singleShot(50, self._minimize_to_tray)
-            return
-
-        if hasattr(self, 'launch_page'):
-            cards_widget = getattr(self.launch_page, 'cards_widget', None)
-            if cards_widget:
-                from kira_env_manager.view.launch_page import InstanceCard
-                for card in cards_widget.findChildren(InstanceCard):
-                    card.cleanup()
-
+        # ---- 真正退出：先确认并停止运行中的实例 ----
         im = getattr(self.launch_page, "instance_manager", lambda: None)()
         if im:
             running = [inst for inst in im.instances() if inst.is_running()]
@@ -322,6 +325,30 @@ QComboBox QAbstractItemView {
                         logger.info(f"退出时停止实例: {inst.name}")
                     except Exception as e:
                         logger.error(f"停止实例失败: {inst.name} - {e}")
+                # 等待进程真正结束再退出，避免 stop() 的守护终止线程被解释器
+                # 中止、遗留孤儿进程（端口被占、下次启动撞端口）。超时需覆盖
+                # POSIX 上 terminate(3s)→kill(2s) 的升级时间。
+                for inst in running:
+                    try:
+                        inst._pm.wait_for_stop(6000)
+                    except Exception:
+                        pass
+
+        # ---- 清理各页面的后台线程与卡片，避免 "QThread destroyed while running" ----
+        if hasattr(self, 'launch_page'):
+            cards_widget = getattr(self.launch_page, 'cards_widget', None)
+            if cards_widget:
+                from kira_env_manager.view.launch_page import InstanceCard
+                for card in cards_widget.findChildren(InstanceCard):
+                    card.cleanup()
+
+        for page_attr in ('home_page', 'env_page', 'project_page'):
+            page = getattr(self, page_attr, None)
+            if page is not None and hasattr(page, 'cleanup'):
+                try:
+                    page.cleanup()
+                except Exception as e:
+                    logger.error(f"清理页面失败 {page_attr}: {e}")
 
         if hasattr(self, 'browser_page'):
             self.browser_page.cleanup()

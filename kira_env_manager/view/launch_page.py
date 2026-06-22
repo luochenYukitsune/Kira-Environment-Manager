@@ -85,7 +85,7 @@ class RouteSpeedWorker(QThread):
     def run(self):
         results = test_all_routes(
             callback=lambda name, lat: self.progress.emit(
-                f"  {name}: {lat}ms" if lat else f"  {name}: 超时"
+                f"  {name}: {lat}ms" if lat is not None else f"  {name}: 超时"
             )
         )
         self.finished.emit(results)
@@ -264,9 +264,11 @@ class DownloadDialog(QDialog):
 
     def _on_speed_done(self, results):
         repo = self.repo_input.text().strip() or "xxynet/KiraAI"
-        if results:
-            best_name = results[0][0]
-            self._best_clone_url, self._best_route_name = build_clone_url_from_results(results, repo)
+        # 过滤掉超时(延迟 None)的线路；全部超时时 reachable 为空，走"全部超时"回退
+        reachable = [r for r in results if r[1] is not None] if results else []
+        if reachable:
+            best_name = reachable[0][0]
+            self._best_clone_url, self._best_route_name = build_clone_url_from_results(reachable, repo)
             self.route_status.setText(f"最快: {best_name}")
             self.route_label.setText(f"已选择: {best_name}")
             # 更新下拉框选中项
@@ -725,29 +727,49 @@ class LaunchPage(QScrollArea):
                     card.refresh_deps()
 
     def _check_orphan_processes(self):
-        """启动时检测残留进程（通过端口探测，避免依赖重建后丢失的 _worker 状态）"""
-        orphan_instances = []
-        for inst in self._im.instances():
-            if check_port_open("127.0.0.1", inst.port):
-                orphan_instances.append(inst)
+        """启动时检测上次会话遗留的进程并按真实 PID 精确终止。
 
-        if not orphan_instances:
+        仅处理"持久化 PID 仍存活且端口被占"的实例 —— 这些是 KEM 上次启动、
+        未正常退出而残留的进程。按记录的 PID 终止（而非端口反查），既能真正
+        杀掉跨会话孤儿（旧逻辑在新会话 _worker is None 时 inst.stop() 是空操作），
+        又不会误杀恰好占用同端口的无关程序。
+        """
+        from kira_env_manager.utils.helpers import (
+            read_running_pids, pid_alive, kill_pid, clear_running_pid,
+        )
+        persisted = read_running_pids()
+        if not persisted:
             return
 
-        names = ", ".join(f"{inst.name}(:{inst.port})" for inst in orphan_instances)
+        orphans = []  # (inst, pid)
+        for inst in self._im.instances():
+            pid = persisted.get(str(inst.port))
+            if pid and pid_alive(pid) and check_port_open("127.0.0.1", inst.port):
+                orphans.append((inst, pid))
+
+        # 清理已失效（进程已退出）的持久化记录
+        for port, pid in list(persisted.items()):
+            if not pid_alive(pid):
+                clear_running_pid(port)
+
+        if not orphans:
+            return
+
+        names = ", ".join(f"{inst.name}(:{inst.port})" for inst, _ in orphans)
         reply = QMessageBox.question(
             self, "检测到残留进程",
-            f"检测到以下实例可能仍在运行:\n{names}\n\n是否强制停止这些进程？",
+            f"检测到上次会话遗留的进程仍在运行:\n{names}\n\n是否强制停止这些进程？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
         )
         if reply == QMessageBox.Yes:
-            for inst in orphan_instances:
+            for inst, pid in orphans:
                 try:
-                    inst.stop()
-                    logger.info(f"已停止残留进程: {inst.name}")
+                    kill_pid(pid)
+                    clear_running_pid(inst.port)
+                    logger.info(f"已终止残留进程: {inst.name} (PID {pid})")
                 except Exception as e:
-                    logger.error(f"停止残留进程失败: {inst.name} - {e}")
+                    logger.error(f"终止残留进程失败: {inst.name} - {e}")
 
     def _create_default(self):
         pp = cfg_get("project_path") or ""
