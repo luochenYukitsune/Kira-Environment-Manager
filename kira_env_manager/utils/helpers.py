@@ -117,6 +117,18 @@ def _pid_state_file():
 _pid_lock = threading.Lock()
 
 
+def _coerce_positive_pid(pid):
+    """将值归一化为正整数 PID；非法/<=0 返回 None。
+
+    关键安全考量：POSIX 上 os.kill(0, sig) 会把信号发给整个进程组（含本程序自身），
+    os.kill(-pid, sig) 发给进程组——若持久化文件损坏成 0/负数会误杀。"""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
 def read_running_pids() -> dict:
     """读取上次会话持久化的 {port(str): pid} 映射；文件缺失/损坏返回空。"""
     import json
@@ -126,7 +138,14 @@ def read_running_pids() -> dict:
             if not f.exists():
                 return {}
             data = json.loads(f.read_text(encoding="utf-8"))
-            return {str(k): int(v) for k, v in data.items()} if isinstance(data, dict) else {}
+            if not isinstance(data, dict):
+                return {}
+            parsed = {}
+            for k, v in data.items():
+                pid = _coerce_positive_pid(v)
+                if pid is not None:
+                    parsed[str(k)] = pid
+            return parsed
     except Exception:
         return {}
 
@@ -159,18 +178,22 @@ def clear_running_pid(port):
 
 
 def kill_pid(pid):
-    """按 PID 终止进程树（精确，不依赖端口反查，避免误杀）。返回是否尝试成功。"""
+    """按 PID 终止进程树（精确，不依赖端口反查，避免误杀）。返回是否确实终止成功。"""
     import os
+    pid = _coerce_positive_pid(pid)
+    if pid is None:
+        return False
     try:
         if os.name == 'nt':
-            subprocess.run(
+            result = subprocess.run(
                 ['taskkill', '/F', '/T', '/PID', str(pid)],
                 capture_output=True, creationflags=CREATE_NO_WINDOW, timeout=5,
             )
+            return result.returncode == 0
         else:
             import signal as _signal
-            os.kill(int(pid), _signal.SIGTERM)
-        return True
+            os.kill(pid, _signal.SIGTERM)
+            return True
     except Exception:
         return False
 
@@ -178,9 +201,8 @@ def kill_pid(pid):
 def pid_alive(pid):
     """判断 PID 是否仍存活（跨平台，尽力而为）。"""
     import os
-    try:
-        pid = int(pid)
-    except (TypeError, ValueError):
+    pid = _coerce_positive_pid(pid)
+    if pid is None:
         return False
     if os.name == 'nt':
         try:
@@ -197,6 +219,36 @@ def pid_alive(pid):
             return True
         except OSError:
             return False
+
+
+# 退出清理时无法及时停止的 QThread 在此“寄存”，避免随父窗口销毁而在运行中被析构
+_orphan_threads = []
+
+
+def detach_thread_until_finished(thread):
+    """退出清理无法在超时内停止某 QThread 时调用：脱离其 Qt 父对象并保持一个
+    模块级强引用，直到线程自然结束才释放。这样父窗口销毁不会连带销毁仍在运行的
+    线程（否则触发 "QThread: Destroyed while thread is still running" 崩溃）。
+
+    适用于持有阻塞子进程、无法协作式取消的 worker（如系统状态检测）。"""
+    if thread is None:
+        return
+    try:
+        thread.setParent(None)
+    except Exception:
+        pass
+    if thread not in _orphan_threads:
+        _orphan_threads.append(thread)
+
+    def _release():
+        try:
+            _orphan_threads.remove(thread)
+        except ValueError:
+            pass
+    try:
+        thread.finished.connect(_release)
+    except Exception:
+        pass
 
 
 def create_state_tooltip(title, content, parent):

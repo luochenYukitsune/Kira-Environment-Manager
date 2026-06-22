@@ -122,12 +122,19 @@ def create_venv(venv_path, python_exe=None):
             err = venv_result.stderr.strip() or venv_result.stdout.strip() or "未知错误"
             return False, f"venv 创建失败: {err}"
         pip_cmd = get_venv_pip_cmd(str(venv_path))
-        upgrade = subprocess.run(
-            pip_cmd + ["install", "--upgrade", "pip"],
-            capture_output=True, text=True, timeout=120,
-            encoding="utf-8", errors="replace",
-            creationflags=CREATE_NO_WINDOW,
-        )
+        try:
+            upgrade = subprocess.run(
+                pip_cmd + ["install", "--upgrade", "pip"],
+                capture_output=True, text=True, timeout=120,
+                encoding="utf-8", errors="replace",
+                creationflags=CREATE_NO_WINDOW,
+            )
+        except subprocess.TimeoutExpired:
+            # venv 本体已创建成功，仅 pip 升级超时——降级为可恢复结果，
+            # 否则外层会误报“创建超时(False)”，且重试会被“路径已存在”卡住。
+            import logging
+            logging.getLogger(__name__).warning("pip 升级超时，虚拟环境已创建: %s", venv_path)
+            return True, f"虚拟环境创建成功（pip 升级超时，可稍后重试）: {venv_path}"
         if upgrade.returncode != 0:
             import logging
             err = (upgrade.stderr or upgrade.stdout or "").strip()[:200]

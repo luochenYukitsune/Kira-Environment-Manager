@@ -328,11 +328,14 @@ QComboBox QAbstractItemView {
                 # 等待进程真正结束再退出，避免 stop() 的守护终止线程被解释器
                 # 中止、遗留孤儿进程（端口被占、下次启动撞端口）。超时需覆盖
                 # POSIX 上 terminate(3s)→kill(2s) 的升级时间。
+                # 不因停止超时而拒绝退出（否则可能像 #11 那样卡住无法退出）；
+                # 未停掉的进程其 PID 已持久化，下次启动的残留检测会清理。
                 for inst in running:
                     try:
-                        inst._pm.wait_for_stop(6000)
-                    except Exception:
-                        pass
+                        if not inst._pm.wait_for_stop(6000):
+                            logger.warning(f"实例未能在超时内停止，退出后由下次启动清理: {inst.name}")
+                    except Exception as e:
+                        logger.error(f"等待实例停止出错: {inst.name} - {e}")
 
         # ---- 清理各页面的后台线程与卡片，避免 "QThread destroyed while running" ----
         if hasattr(self, 'launch_page'):

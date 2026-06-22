@@ -234,10 +234,11 @@ class ProjectPage(QScrollArea):
 
     def cleanup(self):
         """退出前取消并等待后台 git 任务，避免销毁运行中的 QThread。
-        若未能及时结束则保留引用，不置空。"""
+        未能及时结束时脱离父对象并寄存，让其自然结束。"""
         if self._worker and self._worker.isRunning():
             self._worker.requestInterruption()
             self._worker.quit()
             if not self._worker.wait(3000):
-                return
+                from kira_env_manager.utils.helpers import detach_thread_until_finished
+                detach_thread_until_finished(self._worker)
         self._worker = None

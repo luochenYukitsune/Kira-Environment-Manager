@@ -278,8 +278,8 @@ class DownloadDialog(QDialog):
                     break
         else:
             self.route_status.setText("全部超时")
-            self._best_clone_url = self.repo_input.text().strip() or KIRA_GITHUB_URL
-            self._best_route_name = "直连"
+            # 复用直连回退，确保得到的是可 clone 的完整 URL（而非原样的 owner/repo）
+            self._best_clone_url, self._best_route_name = build_clone_url_from_results([], repo)
 
     def _start_download(self):
         target = self.dir_input.text().strip()
@@ -765,9 +765,12 @@ class LaunchPage(QScrollArea):
         if reply == QMessageBox.Yes:
             for inst, pid in orphans:
                 try:
-                    kill_pid(pid)
-                    clear_running_pid(inst.port)
-                    logger.info(f"已终止残留进程: {inst.name} (PID {pid})")
+                    # 仅在确认终止成功后才清除记录，避免 kill 失败却丢失追踪记录
+                    if kill_pid(pid):
+                        clear_running_pid(inst.port)
+                        logger.info(f"已终止残留进程: {inst.name} (PID {pid})")
+                    else:
+                        logger.warning(f"终止残留进程未确认成功，保留记录: {inst.name} (PID {pid})")
                 except Exception as e:
                     logger.error(f"终止残留进程失败: {inst.name} - {e}")
 

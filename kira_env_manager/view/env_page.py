@@ -574,12 +574,13 @@ class EnvPage(QScrollArea):
 
     def cleanup(self):
         """退出前取消并等待所有后台 worker，避免销毁运行中的 QThread。
-        未能及时结束的 worker 保留引用、不置空，避免其在运行时被销毁。"""
+        未能及时结束的 worker 脱离父对象并寄存，让其自然结束后再释放。"""
         for attr in ('_speedtest_worker', '_venv_worker', '_install_worker', '_dep_worker'):
             w = getattr(self, attr, None)
             if w and w.isRunning():
                 w.requestInterruption()
                 w.quit()
                 if not w.wait(3000):
-                    continue
+                    from kira_env_manager.utils.helpers import detach_thread_until_finished
+                    detach_thread_until_finished(w)
             setattr(self, attr, None)
